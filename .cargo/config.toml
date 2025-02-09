@@ -1,0 +1,6 @@
+[build]
+target = "armv7a-none-eabi"  # Correct target for Raspberry Pi Linux
+
+[target.armv7a-none-eabi]
+linker = "arm-none-eabi-ld"
+rustflags = ["-C", "panic=abort", "-C", "link-arg=--script=./linker.ld"]
