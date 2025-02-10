@@ -4,9 +4,10 @@ STACK_SIZE = 0x4000;
 
 SECTIONS
 {
-    . = 0x8000;
+
     .text.boot :
     {
+        . = 0x8000;
         *(.text.boot*)
     }
     . = ALIGN(4096);
@@ -15,6 +16,11 @@ SECTIONS
         *(.text._start)
         *(.text*)
     }
+
+    . = ALIGN(4096);
+    LD_STACK_PTR = .;
+    . = . + STACK_SIZE;
+
     . = ALIGN(4096);
     .rodata :
     {
@@ -37,8 +43,6 @@ SECTIONS
     __bss_size = __bss_end - __bss_start;
 
     . = ALIGN(4096);
-    LD_STACK_PTR = .;
-    . = . + STACK_SIZE;
 
     __end = .;
 }

@@ -1,14 +1,14 @@
 #![no_std]
 #![no_main]
 
-mod os;
+mod drivers;
 
 use core::arch::{asm, global_asm};
-use os::gpio::{write_pin, set_pin_mode, PinMode, Pin};
-use os::time::sleep;
-use os::uart::{uart_init, uart_send_string};
+use core::panic::PanicInfo;
 
-use core::panic::{PanicInfo};
+use drivers::gpio::{write_pin, set_pin_mode, PinMode, Pin};
+use drivers::time::sleep;
+use drivers::uart::{uart_init, uart_send_string, uart_read_line};
 
 global_asm!(include_str!("boot.s"));
 
@@ -28,8 +28,16 @@ pub extern "C" fn _start() -> ! {
     let mut i: u32 = 1;
     loop {
         if i % 10 == 0 {
-            uart_send_string("I have iterated 10 times!\n");
-            panic!("Example kernel panic !!!");
+            uart_send_string("I have iterated 10 times!\nPlease provide a panic message:\n");
+
+            let mut buffer = [0u8; 128];
+            let input = uart_read_line(&mut buffer);
+
+            uart_send_string("You sent: ");
+            uart_send_string(input);
+            uart_send_string("\n");
+            
+            panic!("{}", input);
         }
 
         write_pin(led, true);
