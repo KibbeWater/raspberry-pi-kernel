@@ -1,6 +1,7 @@
 ENTRY(_boot)
 
 STACK_SIZE = 0x4000;
+HEAP_SIZE = 0x100000;
 
 SECTIONS
 {
@@ -41,6 +42,16 @@ SECTIONS
     . = ALIGN(4096);
     __bss_end = .;
     __bss_size = __bss_end - __bss_start;
+
+    . = ALIGN(4096);
+
+    .heap (NOLOAD) :
+    {
+        __heap_start = .;
+        . = . + HEAP_SIZE;
+        __heap_end = .;
+        __heap_size = __heap_end - __heap_start;
+    }
 
     . = ALIGN(4096);
 

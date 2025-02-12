@@ -2,6 +2,8 @@
 #![no_main]
 
 mod drivers;
+mod libs;
+mod synchronization;
 
 use core::arch::{asm, global_asm};
 use drivers::gpio::{write_pin, set_pin_mode, PinMode, Pin};
