@@ -142,8 +142,7 @@ impl Image {
                 e[11] = ATTR_LONG_NAME;
                 e[13] = checksum;
                 let chars = &units[(seq - 1) * LFN_CHARS..seq * LFN_CHARS];
-                let slots = (1..11).step_by(2).chain((14..26).step_by(2)).chain((28..32).step_by(2));
-                for (unit, at) in chars.iter().zip(slots) {
+                for (unit, at) in chars.iter().zip(LFN_OFFSETS) {
                     e[at..at + 2].copy_from_slice(&unit.to_le_bytes());
                 }
                 bytes.extend_from_slice(&e);

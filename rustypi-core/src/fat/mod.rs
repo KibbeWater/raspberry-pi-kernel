@@ -29,6 +29,8 @@ const ENTRY_DELETED: u8 = 0xE5;
 const ENTRY_KANJI_E5: u8 = 0x05;
 const LFN_LAST: u8 = 0x40;
 const LFN_CHARS: usize = 13;
+/// Where a long name entry keeps its `LFN_CHARS` UTF-16 units, in three runs.
+const LFN_OFFSETS: [usize; LFN_CHARS] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
 /// Case flags in the reserved byte of 8.3 entries (set by Windows NT and later).
 const CASE_LOWER_BASE: u8 = 0x08;
 const CASE_LOWER_EXT: u8 = 0x10;
@@ -285,6 +287,11 @@ impl<D: BlockDevice> Fat<D> {
         self.find_in(dir, name)
     }
 
+    /// The volume sector a data cluster starts at.
+    fn first_sector(&self, cluster: Cluster) -> u64 {
+        self.data_start + (cluster.0 as u64 - 2) * self.sectors_per_cluster
+    }
+
     fn find_dir(&mut self, path: &str) -> Result<Dir, D::Error> {
         let mut dir = Dir::Root;
         for name in path.split('/').filter(|part| !part.is_empty()) {
@@ -368,7 +375,7 @@ impl<D: BlockDevice> Fat<D> {
                     _ => break,
                 }
             }
-            let sector = self.data_start + (start.0 as u64 - 2) * self.sectors_per_cluster;
+            let sector = self.first_sector(start);
             self.read_sectors_into(sector, run * self.sectors_per_cluster, &mut bytes)?;
         }
         if let Some(limit) = limit {
@@ -496,9 +503,8 @@ impl LongName {
             self.reset();
             return;
         }
-        let chars = (1..11).step_by(2).chain((14..26).step_by(2)).chain((28..32).step_by(2));
         let base = (seq as usize - 1) * LFN_CHARS;
-        for (i, at) in chars.enumerate() {
+        for (i, at) in LFN_OFFSETS.into_iter().enumerate() {
             self.units[base + i] = u16_at(entry, at);
         }
         self.expected -= 1;

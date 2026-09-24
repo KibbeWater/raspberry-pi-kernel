@@ -193,8 +193,7 @@ fn long_entries(name: &str, short: &[u8; 11]) -> Vec<[u8; DIR_ENTRY_SIZE]> {
             entry[11] = ATTR_LONG_NAME;
             entry[13] = checksum;
             let chars = &units[(seq - 1) * LFN_CHARS..seq * LFN_CHARS];
-            let at = (1..11).step_by(2).chain((14..26).step_by(2)).chain((28..32).step_by(2));
-            for (unit, at) in chars.iter().zip(at) {
+            for (unit, at) in chars.iter().zip(LFN_OFFSETS) {
                 entry[at..at + 2].copy_from_slice(&unit.to_le_bytes());
             }
             entry
@@ -390,7 +389,7 @@ impl<D: WritableBlockDevice> Fat<D> {
             while i + run < clusters.len() && clusters[i + run] == clusters[i] + run as u32 && run < max_run {
                 run += 1;
             }
-            let sector = self.data_start + (clusters[i] as u64 - 2) * self.sectors_per_cluster;
+            let sector = self.first_sector(Cluster(clusters[i]));
             self.device.write_blocks(self.start.offset(sector), &blocks[i * per_cluster..(i + run) * per_cluster])?;
             i += run;
         }
@@ -413,16 +412,8 @@ impl<D: WritableBlockDevice> Fat<D> {
 
     /// Frees the chain starting at `first` (nothing for 0).
     fn free_chain(&mut self, first: u32) -> Result<(), D::Error> {
-        let mut chain = Vec::new();
-        let mut cluster = (first != 0).then_some(Cluster(first));
-        while let Some(current) = cluster {
-            self.check(current.0)?;
-            if chain.len() as u32 >= self.cluster_count {
-                return Err(FatError::ChainLoop);
-            }
-            chain.push(current.0);
-            cluster = self.next(current)?;
-        }
+        // Cluster 0 is an empty file's: no chain.
+        let chain = if first == 0 { Vec::new() } else { self.chain(first)? };
         for &cluster in &chain {
             self.set_fat_entry(cluster, 0)?;
         }
@@ -482,7 +473,7 @@ impl<D: WritableBlockDevice> Fat<D> {
             (Dir::Root, RootDir::Chain(first)) | (Dir::Chain(first), _) => {
                 let mut sectors = Vec::new();
                 for cluster in self.chain(first.0)? {
-                    let first_sector = self.data_start + (cluster as u64 - 2) * self.sectors_per_cluster;
+                    let first_sector = self.first_sector(Cluster(cluster));
                     sectors.extend(first_sector..first_sector + self.sectors_per_cluster);
                 }
                 sectors
@@ -563,7 +554,7 @@ impl<D: WritableBlockDevice> Fat<D> {
         self.set_fat_entry(*chain.last().expect("a chain has clusters"), new[0])?;
         self.flush_fat()?;
         for &cluster in &new {
-            let first_sector = self.data_start + (cluster as u64 - 2) * self.sectors_per_cluster;
+            let first_sector = self.first_sector(Cluster(cluster));
             image.sectors.extend(first_sector..first_sector + self.sectors_per_cluster);
         }
         image.bytes.resize(image.sectors.len() * BLOCK_SIZE, 0);
