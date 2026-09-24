@@ -1,7 +1,7 @@
 // net/interface.rs
 //! One network interface: its addresses, and what it does with the frames it receives. It
 //! answers ARP and pings, resolves neighbours with ARP before sending to them, sends pings of
-//! its own, and gets its address by DHCP. Frames go in through `receive` and out as the
+//! its own, gets its address by DHCP, and passes UDP datagrams for it on (and sends them). Frames go in through `receive` and out as the
 //! return values; `poll` runs its timers. Times are microseconds, from whatever clock the
 //! caller keeps.
 
@@ -21,7 +21,7 @@ pub struct Config {
 }
 
 /// Something worth telling the kernel about.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     /// DHCP gave the interface an address (or a new one).
     Configured(Config),
@@ -29,6 +29,8 @@ pub enum Event {
     Unconfigured,
     /// An answer to one of our pings.
     PingReply { from: Ipv4, seq: u16, rtt_us: u64 },
+    /// A UDP datagram for us (other than DHCP's).
+    Udp { from: Ipv4, from_port: u16, port: u16, data: Vec<u8> },
 }
 
 /// How often a DHCP message goes again without an answer, and how many REQUESTs go before
@@ -159,6 +161,22 @@ impl Interface {
         out
     }
 
+    /// Whether it is waiting on the network: for answers to pings, or for ARP to say where to
+    /// send something. Worth polling often meanwhile.
+    pub fn awaiting(&self) -> bool {
+        !self.pings.is_empty() || !self.waiting.is_empty()
+    }
+
+    /// Sends `data` in a UDP datagram from our port `from_port` to `to`'s port `port`. Returns
+    /// frames to send, like `ping`. `data` must fit in one frame (1472 bytes).
+    pub fn send_udp(&mut self, to: Ipv4, port: u16, from_port: u16, data: &[u8], now: u64) -> Vec<Vec<u8>> {
+        let Some(config) = self.config else { return Vec::new() };
+        let datagram = udp::build(config.address, from_port, to, port, data);
+        let mut out = Vec::new();
+        self.send_ip(to, ipv4::UDP, &datagram, now, &mut out);
+        out
+    }
+
     /// Sends a ping to `target`, number `seq`. Returns frames to send: the ping, or an ARP
     /// request first. Nothing without an address of our own, or a way to `target`.
     pub fn ping(&mut self, target: Ipv4, seq: u16, now: u64) -> Vec<Vec<u8>> {
@@ -217,6 +235,13 @@ impl Interface {
             if let Some(datagram) = udp::parse(packet.payload, packet.src, packet.dst) {
                 if datagram.dst_port == dhcp::CLIENT_PORT && datagram.src_port == dhcp::SERVER_PORT {
                     self.receive_dhcp(datagram.payload, now, out);
+                } else if self.config.is_some_and(|config| packet.dst == config.address) {
+                    self.events.push(Event::Udp {
+                        from: packet.src,
+                        from_port: datagram.src_port,
+                        port: datagram.dst_port,
+                        data: datagram.payload.to_vec(),
+                    });
                 }
             }
             return;
@@ -513,6 +538,42 @@ mod tests {
         // Given up: an answer now finds nothing waiting.
         let answer = Arp { op: arp::REPLY, sender_mac: MAC_MAC, sender_ip: THE_MAC, target_mac: CLIENT, target_ip: OURS };
         assert!(interface.receive(&ethernet::build(CLIENT, MAC_MAC, ethernet::ARP, &answer.to_bytes()), ARP_GIVE_UP_US + 1).is_empty());
+    }
+
+    #[test]
+    fn udp_for_us_is_passed_on_and_can_be_answered() {
+        let mut interface = configured();
+        let datagram = udp::build(THE_MAC, 50000, OURS, 2323, b"tasks\n");
+        let packet = ipv4::build(THE_MAC, OURS, ipv4::UDP, 1, &datagram);
+        assert!(interface.receive(&ethernet::build(CLIENT, MAC_MAC, ethernet::IPV4, &packet), 0).is_empty());
+        let data = b"tasks\n".to_vec();
+        assert_eq!(interface.take_events(), [Event::Udp { from: THE_MAC, from_port: 50000, port: 2323, data }]);
+
+        // For another address: not ours.
+        let other = ipv4::build(THE_MAC, Ipv4([192, 168, 1, 99]), ipv4::UDP, 2, &udp::build(THE_MAC, 1, Ipv4([192, 168, 1, 99]), 2323, b"x"));
+        interface.receive(&ethernet::build(CLIENT, MAC_MAC, ethernet::IPV4, &other), 0);
+        assert!(interface.take_events().is_empty());
+
+        // The answer goes once ARP says where (the sender is a neighbour, not yet known).
+        let out = interface.send_udp(THE_MAC, 50000, 2323, b"reply", 10);
+        assert_eq!(Arp::parse(ethernet::parse(&out[0]).unwrap().payload).unwrap().target_ip, THE_MAC);
+        assert!(interface.awaiting());
+        let answer = Arp { op: arp::REPLY, sender_mac: MAC_MAC, sender_ip: THE_MAC, target_mac: CLIENT, target_ip: OURS };
+        let out = interface.receive(&ethernet::build(CLIENT, MAC_MAC, ethernet::ARP, &answer.to_bytes()), 20);
+        let packet = ipv4::parse(ethernet::parse(&out[0]).unwrap().payload).unwrap();
+        let reply = udp::parse(packet.payload, packet.src, packet.dst).unwrap();
+        assert_eq!((reply.src_port, reply.dst_port, reply.payload), (2323, 50000, &b"reply"[..]));
+        assert!(!interface.awaiting());
+    }
+
+    #[test]
+    fn it_awaits_answers_to_its_pings() {
+        let mut interface = configured();
+        assert!(!interface.awaiting());
+        interface.ping(THE_MAC, 1, 0);
+        assert!(interface.awaiting());
+        interface.poll(PING_TIMEOUT_US);
+        assert!(!interface.awaiting());
     }
 
     #[test]
