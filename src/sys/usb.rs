@@ -146,7 +146,7 @@ fn run(on_input: fn(Input)) {
 }
 
 /// Runs `f` with the host controller and the bus, if USB is running.
-fn with_bus<R>(f: impl FnOnce(&mut Host, &mut Tree<UsbError>) -> R) -> Option<R> {
+pub(super) fn with_bus<R>(f: impl FnOnce(&mut Host, &mut Tree<UsbError>) -> R) -> Option<R> {
     USB.lock(|state| match state {
         State::Running { host, tree } => Some(f(host, tree)),
         _ => None,

@@ -7,6 +7,7 @@ pub mod console;
 pub mod cores;
 pub mod fs;
 pub mod memory;
+pub mod net;
 pub mod print;
 pub mod random;
 pub mod usb;

@@ -38,6 +38,11 @@ the screen and handed to the shell a line at a time, in the layout `keyboard` ch
 Swedish), with accents, key repeat, and Ctrl+C (stop the foreground program), Ctrl+U and
 Ctrl+L. Hubs are polled every 500ms for devices plugged in or pulled out.
 
+Steps 5 and 6 are written, not yet tried on the Pi: bulk transfers, the LAN7800 driver
+(`src/drivers/lan7800.rs`), and a network stack in `rustypi-core/src/net` (Ethernet, ARP,
+IPv4, ICMP, UDP, DHCP), run by a task in `src/sys/net.rs`. `net` shows the link and address,
+`ping` pings.
+
 ## The plan
 
 Each step ends with something to see on the Pi.

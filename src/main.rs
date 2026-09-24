@@ -92,6 +92,7 @@ pub extern "C" fn kernel_main() -> ! {
             sys::usb::Input::Interrupt => Inbound::Interrupt,
         });
     });
+    sys::net::start();
     shell_task()
 }
 
