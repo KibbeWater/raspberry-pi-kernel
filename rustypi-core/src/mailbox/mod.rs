@@ -27,10 +27,14 @@ use core::ptr;
 pub const MESSAGE_WORDS: usize = 256;
 
 /// A message buffer. The firmware needs 16-byte alignment, since the low four bits of the
-/// address carry the channel. Only `Batch` can create one, so every message a `Transport`
-/// sees is well formed.
-#[repr(C, align(16))]
+/// address carry the channel. It gets whole cache lines to itself (64 bytes), so the cache
+/// maintenance around a call can't write a neighbour's stale copy of a shared line over the
+/// firmware's answer. Only `Batch` can create one, so every message a `Transport` sees is well
+/// formed.
+#[repr(C, align(64))]
 pub struct Message([u32; MESSAGE_WORDS]);
+
+const _: () = assert!(size_of::<Message>() % 64 == 0);
 
 impl Message {
     /// The buffer, for handing its address to the firmware.
@@ -104,8 +108,9 @@ impl BusAddress {
 
 #[derive(Clone, Copy, Debug)]
 pub enum MailboxError {
-    /// The firmware rejected the whole message.
-    Firmware,
+    /// The firmware rejected the whole message: its response code, 0x8000_0001 for "couldn't
+    /// parse it". Still the request code (0), it never answered.
+    Firmware(u32),
     /// The firmware left this tag unanswered, usually because it doesn't know it.
     Unanswered { tag: u32 },
     /// The response needed more room than the tag's types allow for.
@@ -121,7 +126,7 @@ pub enum MailboxError {
 impl fmt::Display for MailboxError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            MailboxError::Firmware => write!(f, "firmware rejected the message"),
+            MailboxError::Firmware(code) => write!(f, "firmware rejected the message (response code {code:#x})"),
             MailboxError::Unanswered { tag } => write!(f, "tag {tag:#x} not answered"),
             MailboxError::Truncated { tag, needed, capacity } => {
                 write!(f, "tag {tag:#x} response needs {needed} bytes, room for {capacity}")
@@ -212,7 +217,7 @@ impl Batch {
         transport.call(&mut self.msg);
 
         if self.msg.0[1] != RESPONSE_OK {
-            return Err(MailboxError::Firmware);
+            return Err(MailboxError::Firmware(self.msg.0[1]));
         }
         Ok(Replies { msg: self.msg, len: self.len })
     }
@@ -374,7 +379,7 @@ mod tests {
                 msg.0[1] = 0x8000_0001;
             }
         }
-        assert!(matches!(query::<GetBoardRevision>(&Rejecting, ()), Err(MailboxError::Firmware)));
+        assert!(matches!(query::<GetBoardRevision>(&Rejecting, ()), Err(MailboxError::Firmware(_))));
     }
 
     #[test]
@@ -405,6 +410,13 @@ mod tests {
     fn bus_addresses_drop_their_cache_alias() {
         assert_eq!(BusAddress(0xC3C0_0000).to_arm(), 0x03C0_0000);
         assert_eq!(BusAddress(0x3C00_0000).to_arm(), 0x3C00_0000);
+    }
+
+    #[test]
+    fn messages_have_their_cache_lines_to_themselves() {
+        assert_eq!(align_of::<Message>(), 64);
+        let batch = Batch::new();
+        assert_eq!(batch.msg.0.as_ptr() as usize % 64, 0);
     }
 
     #[test]
