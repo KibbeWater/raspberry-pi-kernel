@@ -10,7 +10,7 @@ pub struct PartitionType(pub u8);
 
 impl PartitionType {
     /// FAT16 and FAT32 types, with CHS or LBA addressing.
-    pub fn is_fat(self) -> bool {
+    fn is_fat(self) -> bool {
         matches!(self.0, 0x04 | 0x06 | 0x0B | 0x0C | 0x0E)
     }
 }
@@ -45,7 +45,7 @@ fn has_boot_signature(block: &Block) -> bool {
 
 /// Whether `block` looks like a FAT boot sector: a jump instruction, 512 bytes per sector,
 /// a power-of-two cluster size and at least one FAT.
-pub fn is_fat_boot_sector(block: &Block) -> bool {
+fn is_fat_boot_sector(block: &Block) -> bool {
     let jump = block[0] == 0xEB || block[0] == 0xE9;
     let bytes_per_sector = u16::from_le_bytes([block[11], block[12]]);
     let sectors_per_cluster = block[13];
@@ -57,7 +57,7 @@ pub fn is_fat_boot_sector(block: &Block) -> bool {
 
 /// The four primary partitions of an MBR, `None` for empty slots. Returns `None` if `block`
 /// has no MBR signature.
-pub fn partitions(block: &Block) -> Option<[Option<Partition>; 4]> {
+fn partitions(block: &Block) -> Option<[Option<Partition>; 4]> {
     if !has_boot_signature(block) {
         return None;
     }

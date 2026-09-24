@@ -120,12 +120,6 @@ pub struct DirEntry {
     first_cluster: Cluster,
 }
 
-impl DirEntry {
-    pub fn first_cluster(&self) -> Cluster {
-        self.first_cluster
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 enum RootDir {
     /// FAT16: a fixed run of sectors after the FATs.
@@ -262,10 +256,6 @@ impl<D: BlockDevice> Fat<D> {
 
     pub fn cluster_size(&self) -> usize {
         self.sectors_per_cluster as usize * BLOCK_SIZE
-    }
-
-    pub fn cluster_count(&self) -> u32 {
-        self.cluster_count
     }
 
     /// Lists a directory. `path` is absolute, `/`-separated and matched case-insensitively,
@@ -627,7 +617,7 @@ mod tests {
             let (mut fat, big) = sample(FatType::Fat32, scatter);
             let entry = fat.metadata("/kernel8 image with a long name.img").unwrap();
             let before = fat.device.commands;
-            assert_eq!(fat.read_chain(entry.first_cluster(), Some(entry.size as usize)).unwrap(), big);
+            assert_eq!(fat.read_chain(entry.first_cluster, Some(entry.size as usize)).unwrap(), big);
             assert_eq!(fat.device.commands - before, commands, "scatter {scatter}");
         }
     }

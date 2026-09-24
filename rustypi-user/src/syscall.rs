@@ -3,8 +3,6 @@
 use core::arch::asm;
 use rustypi_abi::{decode_result, Errno, Registers, Syscall, SVC_SYSCALL};
 
-pub use rustypi_abi::Errno as Error;
-
 /// Makes a system call and returns its result.
 pub fn call(call: Syscall) -> Result<u64, Errno> {
     let Registers { number, args } = call.encode();
