@@ -14,6 +14,11 @@ use crate::{arch, println};
 /// The core that panicked, plus one; 0 while none has.
 static PANICKED: AtomicUsize = AtomicUsize::new(0);
 
+/// Whether a core has panicked: the kernel is on its way down.
+pub fn panicking() -> bool {
+    PANICKED.load(Ordering::Relaxed) != 0
+}
+
 /// Called on every interrupt: if another core panicked, this one stops here for good, so the
 /// report isn't mixed with other output and nothing carries on with the kernel broken. The
 /// others' next timer tick (at most a tick away) brings them here.

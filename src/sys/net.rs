@@ -3,7 +3,8 @@
 //! LAN7800, brings it up with the board's MAC address, and runs a
 //! `rustypi_core::net::interface::Interface` on it, which gets an address by DHCP and answers
 //! ARP and pings. `ping` sends pings of our own. Datagrams to UDP port 2323 are a console:
-//! each line is a shell command, and `reply` sends the answer back.
+//! each line is a shell command, and `reply` sends the answer back. Whoever sent the last one
+//! also gets a copy of everything printed (`mirror`), so programs work over it too.
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -31,8 +32,11 @@ const USB_WAIT: Duration = Duration::from_secs(20);
 
 /// The UDP port of the console.
 pub const CONSOLE_PORT: u16 = 2323;
-/// Most bytes of console reply in one datagram: well inside a frame.
-const MAX_REPLY_DATAGRAM: usize = 1400;
+/// Most bytes of console output in one datagram. Inside a frame, but mostly inside what
+/// macOS `nc -u` reads of a datagram (1024 bytes: it drops the rest).
+const MAX_REPLY_DATAGRAM: usize = 1024;
+/// Console datagrams waiting to go out, at most: past it, the oldest are dropped.
+const MAX_CONSOLE_QUEUE: usize = 64;
 
 /// Who sent a console line, and so where its answer goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +72,36 @@ static PING_REPLIES: IrqLock<VecDeque<(Ipv4, u16, u64)>> = IrqLock::new(VecDeque
 static CONSOLE_OUT: IrqLock<VecDeque<(Peer, Vec<u8>)>> = IrqLock::new(VecDeque::new());
 /// The network task, plus one (0 until it starts), to wake when there is something to send.
 static TASK: AtomicUsize = AtomicUsize::new(0);
+/// The console's user: whoever sent the last line, who gets a copy of what is printed.
+static ATTACHED: IrqLock<Option<Peer>> = IrqLock::new(None);
+
+/// Queues console output for `peer`.
+fn queue(peer: Peer, data: &[u8]) {
+    CONSOLE_OUT.lock(|out| {
+        out.push_back((peer, data.to_vec()));
+        while out.len() > MAX_CONSOLE_QUEUE {
+            out.pop_front();
+        }
+    });
+}
+
+/// Sends a copy of something printed to the console's user, if there is one. Not from
+/// interrupt handlers, a panic, or the network task itself (whose own complaints about
+/// sending would otherwise send more).
+pub fn mirror(args: fmt::Arguments) {
+    if !crate::arch::irqs_enabled() || super::panicking() {
+        return;
+    }
+    let Some(peer) = ATTACHED.lock(|attached| *attached) else { return };
+    if TASK.load(Ordering::Relaxed).checked_sub(1) == Some(sched::current().0) {
+        return;
+    }
+    let text = alloc::format!("{args}");
+    for chunk in text.as_bytes().chunks(MAX_REPLY_DATAGRAM) {
+        queue(peer, chunk);
+    }
+    wake();
+}
 
 /// Cuts the network task's sleep short, for something to send now.
 fn wake() {
@@ -91,18 +125,16 @@ pub fn start(on_console: fn(String, Peer)) {
 /// between lines where it can).
 pub fn reply(peer: Peer, text: &str) {
     let mut rest = text.as_bytes();
-    CONSOLE_OUT.lock(|out| {
-        while !rest.is_empty() {
-            let mut end = rest.len().min(MAX_REPLY_DATAGRAM);
-            if end < rest.len() {
-                if let Some(newline) = rest[..end].iter().rposition(|&b| b == b'\n') {
-                    end = newline + 1;
-                }
+    while !rest.is_empty() {
+        let mut end = rest.len().min(MAX_REPLY_DATAGRAM);
+        if end < rest.len() {
+            if let Some(newline) = rest[..end].iter().rposition(|&b| b == b'\n') {
+                end = newline + 1;
             }
-            out.push_back((peer, rest[..end].to_vec()));
-            rest = &rest[end..];
         }
-    });
+        queue(peer, &rest[..end]);
+        rest = &rest[end..];
+    }
     wake();
 }
 
@@ -184,7 +216,9 @@ fn run(on_console: fn(String, Peer)) {
                 }),
                 Event::Udp { from, from_port, port: CONSOLE_PORT, data } => {
                     let text = String::from_utf8_lossy(&data).into_owned();
-                    on_console(text, Peer { address: from, port: from_port });
+                    let peer = Peer { address: from, port: from_port };
+                    ATTACHED.lock(|attached| *attached = Some(peer));
+                    on_console(text, peer);
                 }
                 Event::Udp { .. } => {}
             }

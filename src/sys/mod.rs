@@ -14,7 +14,7 @@ pub mod usb;
 mod heap;
 mod panic;
 
-pub use panic::stop_if_another_core_panicked;
+pub use panic::{panicking, stop_if_another_core_panicked};
 
 use core::time::Duration;
 use crate::arch;

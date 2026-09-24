@@ -27,6 +27,7 @@ pub fn _print(args: fmt::Arguments) {
         // UartWriter never returns an error.
         let _ = UartWriter.write_fmt(args);
         super::console::write_fmt(args);
+        super::net::mirror(args);
     });
 }
 
