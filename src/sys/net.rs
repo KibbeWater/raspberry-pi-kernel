@@ -4,7 +4,8 @@
 //! `rustypi_core::net::interface::Interface` on it, which gets an address by DHCP and answers
 //! ARP and pings. `ping` sends pings of our own. Datagrams to UDP port 2323 are a console:
 //! each line is a shell command, and `reply` sends the answer back. Whoever sent the last one
-//! also gets a copy of everything printed (`mirror`), so programs work over it too.
+//! also gets a copy of everything printed (`mirror`), so programs work over it too. Port 2324
+//! takes a new kernel, once `update` has armed it (`sys::update`).
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -15,6 +16,7 @@ use core::time::Duration;
 use rustypi_core::net::interface::{Config, Event, Interface};
 use rustypi_core::net::{Ipv4, Mac};
 use rustypi_core::sched::TaskId;
+use rustypi_core::update;
 use crate::drivers::lan7800::{self, Lan7800, Link};
 use crate::drivers::mailbox::tags::GetMacAddress;
 use crate::drivers::mailbox::{query, Mailbox};
@@ -32,6 +34,8 @@ const USB_WAIT: Duration = Duration::from_secs(20);
 
 /// The UDP port of the console.
 pub const CONSOLE_PORT: u16 = 2323;
+/// After a new kernel is installed, how long its answer gets to go out before the reboot.
+const REBOOT_DELAY_US: u64 = 500_000;
 /// Most bytes of console output in one datagram. Inside a frame, but mostly inside what
 /// macOS `nc -u` reads of a datagram (1024 bytes: it drops the rest).
 const MAX_REPLY_DATAGRAM: usize = 1024;
@@ -148,8 +152,15 @@ fn run(on_console: fn(String, Peer)) {
     let mut next_link_check = 0;
     let mut link_up = false;
     let mut failing = false;
+    let mut updates = update::Receiver::new();
+    // Once a new kernel is installed: when to reboot into it, after the answer has gone.
+    let mut reboot_at = None;
     loop {
         let now = timer::now_us();
+        if reboot_at.is_some_and(|at| now >= at) {
+            println!("update: rebooting into the new kernel");
+            super::reboot();
+        }
         if now >= next_link_check {
             next_link_check = now + LINK_CHECK.as_micros() as u64;
             if let Some(Ok(link)) = usb::with_bus(|host, _| lan.link(host)) {
@@ -219,6 +230,36 @@ fn run(on_console: fn(String, Peer)) {
                     let peer = Peer { address: from, port: from_port };
                     ATTACHED.lock(|attached| *attached = Some(peer));
                     on_console(text, peer);
+                }
+                Event::Udp { from, from_port, port: update::PORT, data } => {
+                    let answer = if super::update::still_armed() {
+                        match updates.handle(&data) {
+                            update::Response::Reply(reply) => reply,
+                            update::Response::Complete(image) => {
+                                super::update::disarm();
+                                println!("update: {} bytes from {}, installing", image.len(), from);
+                                match super::update::install(&image) {
+                                    Ok(()) => {
+                                        reboot_at = Some(timer::now_us() + REBOOT_DELAY_US);
+                                        b"F".to_vec()
+                                    }
+                                    Err(error) => {
+                                        println!("update: not installed: {error}");
+                                        alloc::format!("X{error}").into_bytes()
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        updates.reset();
+                        b"Xnot armed: run update on the Pi first".to_vec()
+                    };
+                    let frames = interface.send_udp(from, from_port, update::PORT, &answer, timer::now_us());
+                    if link_up {
+                        for frame in frames {
+                            let _ = usb::with_bus(|host, _| lan.send(host, &frame));
+                        }
+                    }
                 }
                 Event::Udp { .. } => {}
             }

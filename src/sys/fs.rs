@@ -175,6 +175,21 @@ pub fn write_file(path: &str, data: &[u8]) -> Result<(), FsError> {
     with_fs(|fs| Ok(fs.fat.write_file(path, data)?))
 }
 
+/// Installs `image` as the kernel the Pi boots, `/kernel8.img`, copying the one there now to
+/// `/kernel8.bak` first. The only way to replace a boot file: for network updates, which
+/// check the image first (`sys::update`). Each file is written crash-safely, so a failure
+/// part way leaves a bootable kernel.
+pub fn install_kernel(image: &[u8]) -> Result<(), FsError> {
+    with_fs(|fs| {
+        match fs.fat.read_file("/kernel8.img") {
+            Ok(old) => fs.fat.write_file("/kernel8.bak", &old)?,
+            Err(FatError::NotFound) => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(fs.fat.write_file("/kernel8.img", image)?)
+    })
+}
+
 /// Makes a directory.
 pub fn create_dir(path: &str) -> Result<(), FsError> {
     if is_protected(path) {

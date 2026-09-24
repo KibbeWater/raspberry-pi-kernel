@@ -10,6 +10,7 @@ pub mod memory;
 pub mod net;
 pub mod print;
 pub mod random;
+pub mod update;
 pub mod usb;
 mod heap;
 mod panic;

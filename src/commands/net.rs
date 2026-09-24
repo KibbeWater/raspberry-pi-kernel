@@ -11,7 +11,21 @@ use crate::sys::net::{Address, State};
 pub const COMMANDS: &[Command] = &[
     Command { name: "net", args: "", description: "Ethernet link, MAC and IP address", run: net },
     Command { name: "ping", args: "<address> [count]", description: "ping an IPv4 address (4 times unless told)", run: ping },
+    Command { name: "update", args: "", description: "take a new kernel over the network for a minute (tools/deploy.py)", run: update },
 ];
+
+fn update<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+    if !args.is_empty() {
+        return Outcome::Usage;
+    }
+    sys::update::arm();
+    reply.line(LineKind::Rsp, format_args!(
+        "update: ready for {} s on UDP port {}",
+        sys::update::ARMED_FOR.as_secs(),
+        rustypi_core::update::PORT,
+    ));
+    Outcome::Done
+}
 
 /// Most pings one command sends: each takes up to a second, and the shell waits.
 const MAX_PINGS: u16 = 20;
