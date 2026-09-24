@@ -28,10 +28,11 @@ Ethernet.
 | Power on, the MAC address, DMA bus addresses | `rustypi-core/src/mailbox` |
 | Setup packets, device/configuration/hub descriptors, port status, boot keyboard reports, US key map | `rustypi-core/src/usb.rs` (host tested) |
 | DWC2 bring-up: power, core reset, forced host mode, FIFOs, root port reset; polled control transfers by DMA on channel 0 | `src/drivers/usb.rs` |
-| `usb` command: starts the controller, reads the root device's descriptors | `src/sys/usb.rs`, `src/commands/usb.rs` |
+| Enumeration and hubs: addresses, configurations, port power and reset, walking the tree; generic over a `Bus`, tested against a pretend 3B+ bus | `rustypi-core/src/usb/tree.rs` |
+| `usb` command: starts the controller, enumerates the bus, prints it as a tree | `src/sys/usb.rs`, `src/commands/usb.rs` |
 
-`usb` on a 3B+ should report a high-speed hub (class 9) with 4 ports. That proves power, reset,
-DMA and control transfers end to end.
+Steps 1 and 2 below are done. Low and full speed devices behind the hubs (keyboards) show up as
+"needs split transactions", with their port disabled until step 3.
 
 ## The plan
 
