@@ -5,7 +5,11 @@
 //!
 //! A device answers at address 0 from when its port is reset until it is given an address,
 //! so only one may be there at a time: ports are reset one after another, and a port whose
-//! device isn't enumerated (it failed, or needs split transactions) is disabled again.
+//! device failed to enumerate is disabled again.
+//!
+//! On a high speed bus, low and full speed devices are reached through the transaction
+//! translator of the nearest high speed hub above them, with split transactions: `Target`
+//! says which hub and port.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -18,6 +22,17 @@ pub struct Target {
     pub address: u8,
     pub max_packet: u16,
     pub speed: Speed,
+    /// For a low or full speed device on a high speed bus: the translator its transactions
+    /// are split through.
+    pub translator: Option<Translator>,
+}
+
+/// A high speed hub's transaction translator, and the port of that hub the device is
+/// behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Translator {
+    pub hub: u8,
+    pub port: u8,
 }
 
 /// A host controller, as far as enumeration needs one.
@@ -82,6 +97,7 @@ impl<E> From<DescriptorError> for Error<E> {
 pub struct Device<E> {
     pub address: u8,
     pub speed: Speed,
+    pub translator: Option<Translator>,
     pub descriptor: DeviceDescriptor,
     pub configuration: Configuration,
     pub hub: Option<Hub<E>>,
@@ -90,7 +106,12 @@ pub struct Device<E> {
 impl<E> Device<E> {
     /// Endpoint 0, for control transfers to it.
     pub fn target(&self) -> Target {
-        Target { address: self.address, max_packet: self.descriptor.max_packet_size as u16, speed: self.speed }
+        Target {
+            address: self.address,
+            max_packet: self.descriptor.max_packet_size as u16,
+            speed: self.speed,
+            translator: self.translator,
+        }
     }
 
     /// This device and everything behind it, depth first, each with how many hubs deep it is.
@@ -122,25 +143,28 @@ pub struct Hub<E> {
 pub enum Port<E> {
     Empty,
     Device(Device<E>),
-    /// A low or full speed device behind a high speed hub, which only split transactions
-    /// reach. Its port is disabled for now.
-    NeedsSplit(Speed),
     /// Something is there, but enumerating it failed. Its port is disabled.
     Failed(Error<E>),
+}
+
+impl<E> Port<E> {
+    pub fn device(&self) -> Option<&Device<E>> {
+        match self {
+            Port::Device(device) => Some(device),
+            _ => None,
+        }
+    }
 }
 
 /// Enumerates the device on the root port, just reset, at speed `speed`, and everything
 /// behind it if it is a hub.
 pub fn enumerate<B: Bus>(bus: &mut B, speed: Speed) -> Result<Device<B::Error>, Error<B::Error>> {
-    Enumerator { bus, next_address: 1, bus_speed: speed }.device(speed, 0)
+    Enumerator { bus, next_address: 1 }.device(speed, None, 0)
 }
 
 struct Enumerator<'a, B: Bus> {
     bus: &'a mut B,
     next_address: u8,
-    /// The root port's speed: at high speed, slower devices behind hubs need split
-    /// transactions.
-    bus_speed: Speed,
 }
 
 impl<B: Bus> Enumerator<'_, B> {
@@ -149,10 +173,10 @@ impl<B: Bus> Enumerator<'_, B> {
     }
 
     /// Enumerates the device answering at address 0, `depth` hubs below the root.
-    fn device(&mut self, speed: Speed, depth: usize) -> Result<Device<B::Error>, Error<B::Error>> {
+    fn device(&mut self, speed: Speed, translator: Option<Translator>, depth: usize) -> Result<Device<B::Error>, Error<B::Error>> {
         // Packets of 8 always work for the first 8 bytes, which say how big they may be.
         let mut bytes = [0; DeviceDescriptor::LENGTH];
-        let default = Target { address: 0, max_packet: 8, speed };
+        let default = Target { address: 0, max_packet: 8, speed, translator };
         let read = self.control(default, SetupPacket::get_descriptor(DescriptorType::DEVICE, 0, 8), &mut bytes[..8])?;
         let max_packet = DeviceDescriptor::max_packet_size(&bytes[..read])? as u16;
 
@@ -163,7 +187,7 @@ impl<B: Bus> Enumerator<'_, B> {
         self.next_address += 1;
         self.control(Target { max_packet, ..default }, SetupPacket::set_address(address), &mut [])?;
         self.bus.delay_ms(SET_ADDRESS_RECOVERY_MS);
-        let target = Target { address, max_packet, speed };
+        let target = Target { address, max_packet, speed, translator };
 
         let read = self.control(target, SetupPacket::get_descriptor(DescriptorType::DEVICE, 0, DeviceDescriptor::LENGTH as u16), &mut bytes)?;
         let descriptor = DeviceDescriptor::parse(&bytes[..read])?;
@@ -178,7 +202,7 @@ impl<B: Bus> Enumerator<'_, B> {
 
         let is_hub = descriptor.class == Class::HUB || configuration.interfaces.iter().any(|i| i.class == Class::HUB);
         let hub = if is_hub { Some(self.hub(target, depth)?) } else { None };
-        Ok(Device { address, speed, descriptor, configuration, hub })
+        Ok(Device { address, speed, translator, descriptor, configuration, hub })
     }
 
     /// Powers a hub's ports and enumerates what is on each.
@@ -208,13 +232,17 @@ impl<B: Bus> Enumerator<'_, B> {
             Err(error) => return Port::Failed(error),
         }
         let found = self.reset_port(hub, port).and_then(|speed| {
-            if speed != Speed::High && self.bus_speed == Speed::High {
-                return Ok(Port::NeedsSplit(speed));
-            }
             if depth + 1 >= MAX_DEPTH {
                 return Err(Error::TooDeep);
             }
-            self.device(speed, depth + 1).map(Port::Device)
+            // Below a high speed hub, a slower device gets that hub's translator. Further
+            // down, behind a full speed hub, it shares the translator that hub uses.
+            let translator = match (hub.speed, speed) {
+                (Speed::High, Speed::Low | Speed::Full) => Some(Translator { hub: hub.address, port }),
+                (Speed::High, Speed::High) => None,
+                _ => hub.translator,
+            };
+            self.device(speed, translator, depth + 1).map(Port::Device)
         });
         let found = found.unwrap_or_else(Port::Failed);
         if !matches!(found, Port::Device(_)) {
@@ -265,6 +293,8 @@ mod tests {
         configured: Option<u8>,
         /// Answers nothing past its device descriptor.
         broken: bool,
+        /// The hub (by index) and port its transactions must be split through, if any.
+        translator: Option<(usize, u8)>,
     }
 
     struct FakeHub {
@@ -308,6 +338,7 @@ mod tests {
             address: None,
             configured: None,
             broken: false,
+            translator: None,
         }
     }
 
@@ -327,6 +358,7 @@ mod tests {
             devices[0].hub.as_mut().unwrap().ports[2].device = Some(4);
             devices[1].hub.as_mut().unwrap().ports[0].device = Some(2);
             devices[1].hub.as_mut().unwrap().ports[1].device = Some(3);
+            devices[3].translator = Some((1, 2));
             FakeBus { devices, default: Some(0), slept_ms: 0 }
         }
 
@@ -359,6 +391,8 @@ mod tests {
             let index = self.find(target.address).ok_or("nobody at that address")?;
             let device = &self.devices[index];
             assert_eq!(target.speed, device.speed, "talking to a device at the wrong speed");
+            let translator = device.translator.map(|(hub, port)| Translator { hub: self.devices[hub].address.unwrap(), port });
+            assert_eq!(target.translator, translator, "split through the wrong translator");
             let length = setup.length as usize;
             let reply = |bytes: &[u8], data: &mut [u8]| {
                 let n = length.min(bytes.len());
@@ -432,9 +466,9 @@ mod tests {
         let root = enumerate(&mut bus, Speed::High).unwrap();
         let found: Vec<_> = root.walk().iter().map(|(depth, d)| (*depth, d.address, d.descriptor.product)).collect();
         // Depth first: the second hub and what's on it come before the flash drive.
-        assert_eq!(found, [(0, 1, 0x2514), (1, 2, 0x2514), (2, 3, 0x7800), (1, 4, 0x5567)]);
+        assert_eq!(found, [(0, 1, 0x2514), (1, 2, 0x2514), (2, 3, 0x7800), (2, 4, 0xC31C), (1, 5, 0x5567)]);
         // Everyone found was configured.
-        for index in [0, 1, 2, 4] {
+        for index in 0..5 {
             assert_eq!(bus.devices[index].configured, Some(1));
         }
         let hub = root.hub.as_ref().unwrap();
@@ -443,14 +477,32 @@ mod tests {
     }
 
     #[test]
-    fn slow_devices_behind_a_high_speed_hub_wait_for_split_transactions() {
+    fn slow_devices_are_reached_through_their_hubs_translator() {
         let mut bus = FakeBus::pi_3b_plus();
         let root = enumerate(&mut bus, Speed::High).unwrap();
-        let Port::Device(second) = &root.hub.as_ref().unwrap().ports[0] else { panic!("second hub") };
-        assert!(matches!(second.hub.as_ref().unwrap().ports[1], Port::NeedsSplit(Speed::Low)));
-        // Its port was disabled again, so the flash drive after it could be reset.
-        assert!(!bus.devices[1].hub.as_ref().unwrap().ports[1].enabled);
-        assert_eq!(bus.devices[3].address, None);
+        let second = root.hub.as_ref().unwrap().ports[0].device().expect("second hub");
+        let keyboard = second.hub.as_ref().unwrap().ports[1].device().expect("keyboard");
+        assert_eq!(keyboard.speed, Speed::Low);
+        assert_eq!(keyboard.translator, Some(Translator { hub: second.address, port: 2 }));
+        assert_eq!(keyboard.target().translator, keyboard.translator);
+        // High speed devices need none, however deep.
+        assert_eq!(second.hub.as_ref().unwrap().ports[0].device().unwrap().translator, None);
+    }
+
+    #[test]
+    fn devices_behind_a_full_speed_hub_share_its_translator() {
+        let mut bus = FakeBus::pi_3b_plus();
+        // A full speed hub (5) on port 4 of the first hub, with a full speed device (6) on it.
+        bus.devices.push(fake(Speed::Full, 9, 0x05E3, 0x0608, 2));
+        bus.devices.push(fake(Speed::Full, 3, 0x1234, 0x0001, 0));
+        bus.devices[0].hub.as_mut().unwrap().ports[3].device = Some(5);
+        bus.devices[5].hub.as_mut().unwrap().ports[0].device = Some(6);
+        bus.devices[5].translator = Some((0, 4));
+        bus.devices[6].translator = Some((0, 4));
+        let root = enumerate(&mut bus, Speed::High).unwrap();
+        let hub = root.hub.as_ref().unwrap().ports[3].device().expect("full speed hub");
+        let device = hub.hub.as_ref().unwrap().ports[0].device().expect("device behind it");
+        assert_eq!(device.translator, Some(Translator { hub: 1, port: 4 }));
     }
 
     #[test]
@@ -461,8 +513,9 @@ mod tests {
         let Port::Device(second) = &root.hub.as_ref().unwrap().ports[0] else { panic!("second hub") };
         assert!(matches!(&second.hub.as_ref().unwrap().ports[0], Port::Failed(Error::Bus(message)) if message == "broken"));
         assert!(!bus.devices[1].hub.as_ref().unwrap().ports[0].enabled);
-        // The flash drive still got an address, the next free one after the broken device's.
-        assert!(matches!(&root.hub.as_ref().unwrap().ports[2], Port::Device(drive) if drive.address == 4));
+        // The keyboard and flash drive still got addresses, the next free ones after the
+        // broken device's.
+        assert!(matches!(&root.hub.as_ref().unwrap().ports[2], Port::Device(drive) if drive.address == 5));
     }
 
     #[test]

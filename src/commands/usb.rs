@@ -52,8 +52,12 @@ fn list(device: &Device<UsbError>, at: &str, reply: &mut Reply) {
         class => class,
     };
     let hub = device.hub.as_ref().map(|hub| alloc::format!(", {} ports", hub.descriptor.ports)).unwrap_or_default();
+    let split = device
+        .translator
+        .map(|translator| alloc::format!(", split through hub {} port {}", translator.hub, translator.port))
+        .unwrap_or_default();
     reply.line(LineKind::Rsp, format_args!(
-        "{}{} {:04x}:{:04x} {}{}, {} speed",
+        "{}{} {:04x}:{:04x} {}{}, {} speed{}",
         at,
         device.address,
         device.descriptor.vendor,
@@ -61,6 +65,7 @@ fn list(device: &Device<UsbError>, at: &str, reply: &mut Reply) {
         class.name(),
         hub,
         speed_name(device.speed),
+        split,
     ));
     let Some(hub) = &device.hub else { return };
     let child_at = alloc::format!("{}  ", " ".repeat(at.len()));
@@ -69,11 +74,6 @@ fn list(device: &Device<UsbError>, at: &str, reply: &mut Reply) {
         match port {
             Port::Empty => reply.line(LineKind::Rsp, format_args!("{port_at}empty")),
             Port::Device(child) => list(child, &port_at, reply),
-            Port::NeedsSplit(speed) => reply.line(LineKind::Rsp, format_args!(
-                "{}{} speed device, needs split transactions (not yet)",
-                port_at,
-                speed_name(*speed),
-            )),
             Port::Failed(error) => reply.line(LineKind::Rsp, format_args!("{port_at}failed: {error}")),
         }
     }

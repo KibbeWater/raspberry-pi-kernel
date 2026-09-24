@@ -12,7 +12,7 @@ use core::arch::asm;
 use core::fmt;
 use core::time::Duration;
 use rustypi_core::mailbox::BusAddress;
-use rustypi_core::usb::tree::{Bus, Target};
+use rustypi_core::usb::tree::{Bus, Target, Translator};
 use rustypi_core::usb::{Direction, SetupPacket, Speed};
 use crate::board::PERIPHERAL_BASE;
 use crate::drivers::mailbox::tags::{DeviceId, PowerState, SetPowerState};
@@ -84,6 +84,11 @@ const PORT_POWER: u32 = 1 << 12;
 /// that means to change something else.
 const PORT_WRITE_CLEARS: u32 = 1 << 1 | 1 << 2 | 1 << 3 | 1 << 5;
 
+const CHAN_SPLIT_ENABLE: u32 = 1 << 31;
+const CHAN_SPLIT_COMPLETE: u32 = 1 << 16;
+/// Transaction position: all of it, in one split (never more than a packet for control).
+const CHAN_SPLIT_ALL: u32 = 3;
+
 const CHAR_EP_IN: u32 = 1 << 15;
 const CHAR_LOW_SPEED: u32 = 1 << 17;
 const CHAR_EP_CONTROL: u32 = 0 << 18;
@@ -95,13 +100,25 @@ const INT_XFER_COMPLETE: u32 = 1 << 0;
 const INT_HALTED: u32 = 1 << 1;
 const INT_STALL: u32 = 1 << 3;
 const INT_NAK: u32 = 1 << 4;
+const INT_ACK: u32 = 1 << 5;
 const INT_ERRORS: u32 = 1 << 2 | 1 << 3 | 1 << 7 | 1 << 8 | 1 << 9 | 1 << 10;
 
 /// Data PIDs, in the transfer size register.
 #[derive(Clone, Copy)]
 enum Pid {
+    Data0 = 0,
     Data1 = 2,
     Setup = 3,
+}
+
+impl Pid {
+    /// The next data packet's PID. (Only data packets toggle.)
+    fn toggled(self) -> Pid {
+        match self {
+            Pid::Data0 => Pid::Data1,
+            Pid::Data1 | Pid::Setup => Pid::Data0,
+        }
+    }
 }
 
 /// FIFO sizes, in 32-bit words. The controller has 4080 in all.
@@ -119,6 +136,14 @@ const DEBOUNCE: Duration = Duration::from_millis(100);
 const RESET_HOLD: Duration = Duration::from_millis(50);
 const RESET_RECOVERY: Duration = Duration::from_millis(20);
 const TRANSFER_TIMEOUT_US: u64 = 500_000;
+/// How long one split packet may take, retries and all.
+const SPLIT_TIMEOUT_US: u64 = 1_000_000;
+/// Transaction errors a split packet may run into before giving up, and complete splits the
+/// translator may answer "not yet" before the packet starts over (Circle's figures).
+const MAX_SPLIT_ERRORS: u32 = 3;
+const MAX_NYETS: u32 = 3;
+/// A high speed microframe.
+const MICROFRAME_US: u64 = 125;
 const REGISTER_TIMEOUT_US: u64 = 100_000;
 
 const CACHE_LINE: usize = 64;
@@ -290,29 +315,17 @@ impl Host {
             write(channel(n, CHAN_CHARACTER), read(channel(n, CHAN_CHARACTER)) | CHAR_DISABLE);
             wait_for("a channel to halt", REGISTER_TIMEOUT_US, || read(channel(n, CHAN_INT)) & INT_HALTED != 0)?;
         }
+        match target.translator {
+            None => self.direct_transfer(target, direction, pid, length, stage),
+            Some(translator) => self.split_transfer(target, translator, direction, pid, length, stage),
+        }
+    }
 
+    /// A stage straight to a device at the bus's own speed: all its packets in one go.
+    fn direct_transfer(&mut self, target: Target, direction: Direction, pid: Pid, length: usize, stage: &'static str) -> Result<usize, UsbError> {
+        let packets = length.div_ceil(target.max_packet as usize).max(1) as u32;
         loop {
-            self.buffer.clean_and_invalidate();
-            let packets = length.div_ceil(target.max_packet as usize).max(1) as u32;
-            write(channel(n, CHAN_INT), u32::MAX);
-            write(channel(n, CHAN_INT_MASK), 0);
-            write(channel(n, CHAN_SPLIT), 0);
-            write(channel(n, CHAN_XFER_SIZE), length as u32 | packets << 19 | (pid as u32) << 29);
-            write(channel(n, CHAN_DMA), self.buffer.bus_address());
-            let mut character = target.max_packet as u32 & 0x7FF
-                | CHAR_EP_CONTROL
-                | CHAR_MULTI_COUNT_1
-                | (target.address as u32 & 0x7F) << 22;
-            if direction == Direction::In {
-                character |= CHAR_EP_IN;
-            }
-            if target.speed == Speed::Low {
-                character |= CHAR_LOW_SPEED;
-            }
-            write(channel(n, CHAN_CHARACTER), character | CHAR_ENABLE);
-
-            wait_for("a transfer", TRANSFER_TIMEOUT_US, || read(channel(n, CHAN_INT)) & INT_HALTED != 0)?;
-            let interrupts = read(channel(n, CHAN_INT));
+            let (interrupts, remaining) = self.run_channel(target, direction, pid, 0, length, packets, 0)?;
             if interrupts & INT_STALL != 0 {
                 return Err(UsbError::Stalled(stage));
             }
@@ -324,11 +337,147 @@ impl Host {
             if interrupts & INT_ERRORS != 0 || interrupts & INT_XFER_COMPLETE == 0 {
                 return Err(UsbError::Transfer { stage, interrupts });
             }
-            // DMA wrote the buffer: drop anything the CPU cached of it meanwhile.
-            self.buffer.clean_and_invalidate();
-            let remaining = (read(channel(n, CHAN_XFER_SIZE)) & 0x7FFFF) as usize;
             return Ok(length - remaining.min(length));
         }
+    }
+
+    /// A stage to a low or full speed device through a high speed hub's transaction
+    /// translator: a packet at a time, each a start split the hub takes on, then complete
+    /// splits until the hub has the device's answer. Like Circle's non-periodic split
+    /// scheduling.
+    fn split_transfer(
+        &mut self,
+        target: Target,
+        translator: Translator,
+        direction: Direction,
+        pid: Pid,
+        length: usize,
+        stage: &'static str,
+    ) -> Result<usize, UsbError> {
+        let started = timer::now_us();
+        let mut done = 0;
+        let mut pid = pid;
+        loop {
+            let size = (length - done).min(target.max_packet as usize);
+            let moved = self.split_packet(target, translator, direction, pid, done, size, stage, started)?;
+            done += moved;
+            pid = pid.toggled();
+            // A short packet ends the stage early.
+            if moved < size || done >= length {
+                return Ok(done);
+            }
+        }
+    }
+
+    /// One packet of a split stage, `size` bytes at `offset` in the buffer. Returns how many
+    /// bytes moved.
+    #[allow(clippy::too_many_arguments)]
+    fn split_packet(
+        &mut self,
+        target: Target,
+        translator: Translator,
+        direction: Direction,
+        pid: Pid,
+        offset: usize,
+        size: usize,
+        stage: &'static str,
+        started: u64,
+    ) -> Result<usize, UsbError> {
+        let split = CHAN_SPLIT_ENABLE
+            | CHAN_SPLIT_ALL << 14
+            | (translator.hub as u32 & 0x7F) << 7
+            | translator.port as u32 & 0x7F;
+        let mut errors = 0;
+        'start: loop {
+            if timer::now_us() - started > SPLIT_TIMEOUT_US {
+                return Err(UsbError::Timeout("a split transaction"));
+            }
+            let (interrupts, _) = self.run_channel(target, direction, pid, offset, size, 1, split)?;
+            if interrupts & INT_STALL != 0 {
+                return Err(UsbError::Stalled(stage));
+            }
+            if interrupts & INT_ACK == 0 {
+                // The translator is busy (NAK), or the start split was lost: try again.
+                if interrupts & INT_ERRORS != 0 {
+                    errors += 1;
+                    if errors > MAX_SPLIT_ERRORS {
+                        return Err(UsbError::Transfer { stage, interrupts });
+                    }
+                }
+                timer::delay_us(MICROFRAME_US);
+                continue 'start;
+            }
+
+            let mut nyets = 0;
+            loop {
+                let (interrupts, remaining) = self.run_channel(target, direction, pid, offset, size, 1, split | CHAN_SPLIT_COMPLETE)?;
+                if interrupts & INT_STALL != 0 {
+                    return Err(UsbError::Stalled(stage));
+                }
+                if interrupts & INT_XFER_COMPLETE != 0 {
+                    return Ok(size - remaining.min(size));
+                }
+                if interrupts & INT_NAK != 0 {
+                    // The device wasn't ready: start the packet over, a little later.
+                    timer::delay_us(5 * MICROFRAME_US);
+                    continue 'start;
+                }
+                if interrupts & INT_ERRORS != 0 {
+                    errors += 1;
+                    if errors > MAX_SPLIT_ERRORS {
+                        return Err(UsbError::Transfer { stage, interrupts });
+                    }
+                    continue 'start;
+                }
+                // NYET: the translator doesn't have the answer yet.
+                nyets += 1;
+                if nyets > MAX_NYETS {
+                    continue 'start;
+                }
+                timer::delay_us(5 * MICROFRAME_US);
+            }
+        }
+    }
+
+    /// Runs one transaction (or, direct, a whole stage) on the control channel and waits for
+    /// it to halt. `split` goes into the split register. Returns the channel's interrupt bits
+    /// and how many of `length` bytes weren't moved.
+    #[allow(clippy::too_many_arguments)]
+    fn run_channel(
+        &mut self,
+        target: Target,
+        direction: Direction,
+        pid: Pid,
+        offset: usize,
+        length: usize,
+        packets: u32,
+        split: u32,
+    ) -> Result<(u32, usize), UsbError> {
+        let n = CONTROL_CHANNEL;
+        self.buffer.clean_and_invalidate();
+        write(channel(n, CHAN_INT), u32::MAX);
+        write(channel(n, CHAN_INT_MASK), 0);
+        write(channel(n, CHAN_SPLIT), split);
+        write(channel(n, CHAN_XFER_SIZE), length as u32 | packets << 19 | (pid as u32) << 29);
+        write(channel(n, CHAN_DMA), self.buffer.bus_address() + offset as u32);
+        let mut character = target.max_packet as u32 & 0x7FF
+            | CHAR_EP_CONTROL
+            | CHAR_MULTI_COUNT_1
+            | (target.address as u32 & 0x7F) << 22;
+        if direction == Direction::In {
+            character |= CHAR_EP_IN;
+        }
+        if target.speed == Speed::Low {
+            character |= CHAR_LOW_SPEED;
+        }
+        write(channel(n, CHAN_CHARACTER), character | CHAR_ENABLE);
+
+        wait_for("a transfer", TRANSFER_TIMEOUT_US, || read(channel(n, CHAN_INT)) & INT_HALTED != 0)?;
+        let interrupts = read(channel(n, CHAN_INT));
+        // DMA may have written the buffer: drop anything the CPU cached of it meanwhile.
+        self.buffer.clean_and_invalidate();
+        let remaining = (read(channel(n, CHAN_XFER_SIZE)) & 0x7FFFF) as usize;
+        Ok((interrupts, remaining))
     }
 }
 

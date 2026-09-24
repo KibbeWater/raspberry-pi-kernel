@@ -31,8 +31,8 @@ Ethernet.
 | Enumeration and hubs: addresses, configurations, port power and reset, walking the tree; generic over a `Bus`, tested against a pretend 3B+ bus | `rustypi-core/src/usb/tree.rs` |
 | `usb` command: starts the controller, enumerates the bus, prints it as a tree | `src/sys/usb.rs`, `src/commands/usb.rs` |
 
-Steps 1 and 2 below are done. Low and full speed devices behind the hubs (keyboards) show up as
-"needs split transactions", with their port disabled until step 3.
+Steps 1 to 3 below are done: low and full speed devices behind the hubs (keyboards) are
+enumerated through their hub's transaction translator.
 
 ## The plan
 
