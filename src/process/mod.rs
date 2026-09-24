@@ -63,9 +63,8 @@ pub struct Fault {
 }
 
 impl Fault {
-    /// The exception class in ESR_EL1 bits [31:26].
     pub fn class(&self) -> u64 {
-        self.esr >> 26
+        exception::class(self.esr)
     }
 }
 

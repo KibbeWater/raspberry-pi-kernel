@@ -30,15 +30,19 @@ pub struct ExceptionContext {
 }
 
 impl ExceptionContext {
-    /// The exception class in ESR_EL1 bits [31:26].
     pub fn class(&self) -> u64 {
-        self.esr >> 26
+        class(self.esr)
     }
 }
 
-/// Names the exception class in ESR_EL1 bits [31:26].
+/// The exception class in ESR_EL1 bits [31:26].
+pub fn class(esr: u64) -> u64 {
+    esr >> 26
+}
+
+/// Names the exception class of an ESR_EL1 value.
 pub fn class_name(esr: u64) -> &'static str {
-    match esr >> 26 {
+    match class(esr) {
         0x00 => "unknown reason (undefined instruction?)",
         0x07 => "floating point or SIMD instruction",
         0x0E => "illegal execution state",
@@ -69,7 +73,7 @@ pub const CLASS_FP: u64 = 0x07;
 #[no_mangle]
 extern "C" fn exception_sync(ctx: *mut ExceptionContext, _kind: u64) -> *mut ExceptionContext {
     let esr = unsafe { (*ctx).esr };
-    if esr >> 26 == CLASS_SVC && esr & 0xFFFF == sched::SVC_YIELD as u64 {
+    if class(esr) == CLASS_SVC && esr & 0xFFFF == sched::SVC_YIELD as u64 {
         return sched::on_yield(ctx);
     }
     let ctx = unsafe { &*ctx };
