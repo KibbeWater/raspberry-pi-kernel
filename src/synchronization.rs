@@ -11,7 +11,7 @@
 //!   - <https://doc.rust-lang.org/std/cell/index.html>
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use rustypi_core::lock::{Acquire, LockState};
 use crate::{arch, sched};
 
@@ -29,15 +29,19 @@ pub mod interface {
     }
 }
 
-/// A lock that masks IRQs while held, so interrupt handlers can't observe or modify the data
-/// halfway through an update.
+/// A spinlock that also masks IRQs while held, so interrupt handlers on this core can't
+/// observe or modify the data halfway through an update, and other cores wait their turn.
+/// For short updates only: another core spins meanwhile, with its IRQs masked too.
 ///
-/// Only sound while the kernel runs on a single core; other cores would need a spinlock on
-/// top. Must not be locked again from inside its own closure.
+/// Locking it again on the same core, from inside its own closure or from an interrupt
+/// handler, would spin forever, so it panics instead. Never take a `TryLock` while holding
+/// one: a core spinning for it with IRQs masked could be what the holder waits on.
 pub struct IrqLock<T>
 where
     T: ?Sized,
 {
+    /// The holding core plus one; 0 when free.
+    owner: AtomicUsize,
     data: UnsafeCell<T>,
 }
 
@@ -48,6 +52,7 @@ impl<T> IrqLock<T> {
     /// Create an instance.
     pub const fn new(data: T) -> Self {
         Self {
+            owner: AtomicUsize::new(0),
             data: UnsafeCell::new(data),
         }
     }
@@ -58,25 +63,43 @@ impl<T> interface::Mutex for IrqLock<T> {
 
     fn lock<R>(&self, f: impl FnOnce(&mut Self::Data) -> R) -> R {
         let saved = arch::irq_save();
-        // With IRQs masked on the only running core, nothing else can reach the data.
+        let me = arch::core_id() + 1;
+        if spin_until_owned(&self.owner, me, || ()).is_err() {
+            panic!("IrqLock locked again on core {}", me - 1);
+        }
+        // Held by this core, with IRQs masked: nothing else can reach the data.
         let result = f(unsafe { &mut *self.data.get() });
+        self.owner.store(0, Ordering::Release);
         arch::irq_restore(saved);
         result
     }
 }
 
-/// A lock that never waits and never masks IRQs: if it is already held, `try_lock` gives up
-/// and returns `None`. For data that is slow to update, where blocking interrupts would lose
-/// UART bytes, like the screen, the mailbox or console output.
+/// Takes `owner` for `me` (a core plus one), spinning while another core has it. If this core
+/// has it already, returns `held_here()` instead.
+fn spin_until_owned<R>(owner: &AtomicUsize, me: usize, held_here: impl FnOnce() -> R) -> Result<(), R> {
+    loop {
+        match owner.compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed) {
+            Ok(_) => return Ok(()),
+            Err(holder) if holder == me => return Err(held_here()),
+            Err(_) => core::hint::spin_loop(),
+        }
+    }
+}
+
+/// A lock that never masks IRQs, for data that is slow to update, where masking interrupts
+/// would lose UART bytes: the screen, the mailbox, console output. Another core that wants it
+/// spins until it is free; on the holder's own core, `try_lock` gives up and returns `None`.
 ///
-/// Holding it disables preemption, so no other task can find it held. Only an interrupt or
-/// exception handler that arrived while the holder was running can, and that one always
-/// finishes (or never returns) before the holder continues. Only sound on a single core.
+/// Holding it disables preemption, so no other task on the holder's core can find it held.
+/// Only an interrupt or exception handler that arrived while the holder was running can, and
+/// that one always finishes (or never returns) before the holder continues.
 pub struct TryLock<T>
 where
     T: ?Sized,
 {
-    locked: AtomicBool,
+    /// The holding core plus one; 0 when free.
+    owner: AtomicUsize,
     data: UnsafeCell<T>,
 }
 
@@ -87,22 +110,22 @@ impl<T> TryLock<T> {
     /// Create an instance.
     pub const fn new(data: T) -> Self {
         Self {
-            locked: AtomicBool::new(false),
+            owner: AtomicUsize::new(0),
             data: UnsafeCell::new(data),
         }
     }
 
-    /// Runs `f` with the data, or returns `None` without running it if the lock is held.
+    /// Runs `f` with the data, or returns `None` without running it if this core holds the
+    /// lock already.
     pub fn try_lock<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
-        if self.locked.load(Ordering::Acquire) {
-            return None;
-        }
-        Some(sched::no_preempt(|| {
-            self.locked.store(true, Ordering::Release);
+        // Preemption goes off first, so the core can't change while the lock is held.
+        sched::no_preempt(|| {
+            let me = arch::core_id() + 1;
+            spin_until_owned(&self.owner, me, || ()).ok()?;
             let result = f(unsafe { &mut *self.data.get() });
-            self.locked.store(false, Ordering::Release);
-            result
-        }))
+            self.owner.store(0, Ordering::Release);
+            Some(result)
+        })
     }
 }
 
@@ -142,9 +165,8 @@ impl<T> interface::Mutex for Mutex<T> {
         let can_block = arch::irqs_enabled();
         let me = sched::current();
 
-        // With IRQs masked, the holder can't run (and hand the lock over) between queueing
-        // and blocking.
-        let saved = arch::irq_save();
+        // A holder that hands the lock over before this task blocks leaves it a wake-up, so
+        // `block` returns straight away.
         match self.state.lock(|state| state.lock(me)) {
             Ok(Acquire::Acquired) => {}
             Ok(Acquire::Queued) if !can_block => {
@@ -156,7 +178,6 @@ impl<T> interface::Mutex for Mutex<T> {
             }
             Err(error) => panic!("Mutex::lock: {:?}", error),
         }
-        arch::irq_restore(saved);
 
         // This task owns the lock until it unlocks below.
         let result = f(unsafe { &mut *self.data.get() });

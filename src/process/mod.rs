@@ -19,7 +19,6 @@ mod programs;
 
 pub use programs::{Program, PROGRAMS};
 
-use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -31,7 +30,6 @@ use rustypi_core::elf;
 use rustypi_core::paging::{Access, AddressSpace, MapError, PAGE_SIZE};
 use rustypi_core::sched::TaskId;
 use crate::arch::exception::{self, ExceptionContext, CLASS_FP, CLASS_SVC};
-use crate::arch::fp::{self, FpState};
 use crate::arch::{self, mmu};
 use crate::drivers::timer;
 use crate::sched::{self, UserStart};
@@ -159,8 +157,6 @@ struct Running {
     handles: handles::Handles,
     /// The child it is waiting on, which gets its input meanwhile.
     waiting_for: Option<TaskId>,
-    /// Its FP/SIMD registers, while another program has them (see `arch::fp`).
-    fp: Box<FpState>,
     /// Where its `INPUT` comes from and its `OUTPUT` goes.
     io: Io,
     /// The program that started it, which reports how it ends; `None` for the shell's.
@@ -292,7 +288,6 @@ fn spawn_with(name: &str, code: Code, args: &str, io: Io, parent: Option<TaskId>
         reading_input: false,
         handles: handles::Handles::new(),
         waiting_for: None,
-        fp: Box::new(FpState::new()),
         io,
         parent,
         cwd: cwd.into(),
@@ -396,23 +391,6 @@ fn was_killed(id: TaskId) -> bool {
     PROCESSES.lock(|processes| processes.get(&id).is_some_and(|running| running.killed))
 }
 
-/// Gives the running program, which just trapped on an FP instruction, the FP/SIMD registers:
-/// saves their owner's values and loads its own. Called with IRQs masked.
-fn take_fp_registers() {
-    let me = sched::current();
-    PROCESSES.lock(|processes| {
-        if let Some(owner) = fp::owner().filter(|&owner| owner != me) {
-            // An owner that has exited is gone from here, and its values with it.
-            if let Some(running) = processes.get_mut(&owner) {
-                fp::save(&mut running.fp);
-            }
-        }
-        fp::load(&processes.get(&me).expect("a user task has a process").fp);
-        fp::set_owner(Some(me));
-        fp::allow_for(me);
-    });
-}
-
 /// Mapping into a fresh address space: only running out of memory can go wrong.
 fn out_of_memory(error: MapError) -> SpawnError {
     match error {
@@ -426,7 +404,7 @@ pub fn on_user_sync(ctx: *mut ExceptionContext) -> *mut ExceptionContext {
     let context = unsafe { &mut *ctx };
     if context.class() == CLASS_FP {
         // The instruction runs again once the program has the registers.
-        take_fp_registers();
+        sched::take_fp_registers();
         return ctx;
     }
     if context.class() != CLASS_SVC || context.esr & 0xFFFF != SVC_SYSCALL as u64 {
@@ -642,9 +620,6 @@ fn exit(status: Exit) -> ! {
     // (or be tagged with its ASID, which goes back to the pool).
     sched::leave_user_space();
     mmu::flush_tlb();
-    if fp::owner() == Some(id) {
-        fp::set_owner(None);
-    }
     running.exit.lock(|exit| *exit = Some(status));
     // A parent still watching (holding its handle, or waiting on it) reports the exit itself;
     // otherwise nobody would. Crashes are always worth the details.

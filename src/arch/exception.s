@@ -1,6 +1,8 @@
 // Exception vector table for EL1. Each entry saves the interrupted registers as an
 // `ExceptionContext` on the stack and calls a Rust handler with it. The handler returns the
 // context to resume: usually the same one, or another task's saved context to switch to it.
+// `sched_finish_switch` runs on the resumed context's stack, below the context, which
+// `exception_restore` then pops.
 
 // Fills one 128-byte vector slot:
 // \handler(ctx: *mut ExceptionContext, kind: u64) -> *mut ExceptionContext.
@@ -33,6 +35,8 @@
     mov     x1, #\kind
     bl      \handler
     mov     sp, x0
+    // Off the stack of any task this core switched away from: other cores may take it now.
+    bl      sched_finish_switch
     b       exception_restore
 .endm
 

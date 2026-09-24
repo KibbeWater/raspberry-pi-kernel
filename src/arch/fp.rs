@@ -1,15 +1,18 @@
 // fp.rs
-//! Floating point and SIMD registers for user programs, switched lazily.
+//! Floating point and SIMD registers for user programs.
 //!
-//! The kernel is softfloat and never touches the FP/SIMD registers, so they keep whatever the
-//! last program to use them left there: that program owns them. Only the owner may use them
-//! from EL0 (CPACR_EL1.FPEN); anyone else traps on their first FP instruction, and `process`
-//! then saves the owner's registers and loads the newcomer's. Switching tasks costs nothing
-//! extra unless two programs take turns using floating point.
+//! The kernel is softfloat and never touches the FP/SIMD registers, so each core's keep
+//! whatever the last program to use them there left: that program owns them on that core.
+//! Programs load their values lazily: EL0 traps on its first FP instruction after a switch
+//! (CPACR_EL1.FPEN) unless the registers already hold its values, and the scheduler then
+//! loads them. They are saved eagerly, whenever an owner is switched away from, so the saved
+//! copy is always current and a program can move to another core. The scheduler does both
+//! (`sched::take_fp_registers`); this is the mechanism.
 
 use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use rustypi_core::sched::TaskId;
+use crate::board::CORES;
 
 /// Everything a program can see of the FP/SIMD unit.
 #[repr(C, align(16))]
@@ -26,25 +29,25 @@ impl FpState {
     }
 }
 
-/// The owning task's id plus one; 0 for none.
-static OWNER: AtomicUsize = AtomicUsize::new(0);
+/// Per core, the owning task's id plus one; 0 for none.
+static OWNER: [AtomicUsize; CORES] = [const { AtomicUsize::new(0) }; CORES];
 
 /// CPACR_EL1.FPEN: EL0 traps, EL1 doesn't. And neither traps.
 const FPEN_TRAP_EL0: u64 = 0b01 << 20;
 const FPEN_NO_TRAPS: u64 = 0b11 << 20;
 
-/// The task whose values are in the FP/SIMD registers.
-pub fn owner() -> Option<TaskId> {
-    OWNER.load(Ordering::Relaxed).checked_sub(1).map(TaskId)
+/// The task whose values are in `core`'s FP/SIMD registers.
+pub fn owner(core: usize) -> Option<TaskId> {
+    OWNER[core].load(Ordering::Relaxed).checked_sub(1).map(TaskId)
 }
 
-pub fn set_owner(task: Option<TaskId>) {
-    OWNER.store(task.map_or(0, |task| task.0 + 1), Ordering::Relaxed);
+pub fn set_owner(core: usize, task: Option<TaskId>) {
+    OWNER[core].store(task.map_or(0, |task| task.0 + 1), Ordering::Relaxed);
 }
 
-/// Lets EL0 use the FP/SIMD registers only while `task`, about to run, owns them.
-pub fn allow_for(task: TaskId) {
-    let fpen = if owner() == Some(task) { FPEN_NO_TRAPS } else { FPEN_TRAP_EL0 };
+/// Whether EL0 on this core may use the FP/SIMD registers without trapping.
+pub fn allow_el0(allowed: bool) {
+    let fpen = if allowed { FPEN_NO_TRAPS } else { FPEN_TRAP_EL0 };
     unsafe { asm!("msr cpacr_el1, {}", "isb", in(reg) fpen, options(nostack)) };
 }
 

@@ -17,6 +17,15 @@ pub fn exception_level() -> u8 {
     (el >> 2 & 3) as u8
 }
 
+/// The core this code runs on, `0..board::CORES`. Stable while IRQs are masked or preemption
+/// is off; otherwise the task may move to another core right after.
+#[inline(always)]
+pub fn core_id() -> usize {
+    let mpidr: u64;
+    unsafe { asm!("mrs {}, mpidr_el1", out(reg) mpidr, options(nomem, nostack, preserves_flags)) };
+    (mpidr & 0xFF) as usize
+}
+
 /// Unmasks IRQs. Also a compiler barrier.
 #[inline(always)]
 pub fn irq_enable() {

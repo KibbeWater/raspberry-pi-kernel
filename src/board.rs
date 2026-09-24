@@ -1,6 +1,9 @@
 // board.rs
 //! Constants for the board this kernel runs on (Raspberry Pi 3B+, BCM2837).
 
+/// Cortex-A53 cores on the BCM2837.
+pub const CORES: usize = 4;
+
 /// Start of the peripheral MMIO window as seen from the ARM cores.
 pub const PERIPHERAL_BASE: usize = 0x3F00_0000;
 
