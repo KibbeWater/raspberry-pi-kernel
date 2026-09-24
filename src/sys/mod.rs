@@ -10,7 +10,8 @@ mod panic;
 use core::time::Duration;
 use crate::arch;
 use crate::drivers::interrupt::{self, Irq};
-use crate::drivers::{mailbox, power, timer};
+use crate::drivers::mailbox::{self, tags, Batch};
+use crate::drivers::{power, timer};
 use crate::drivers::uart::Uart;
 
 /// Git commit the kernel was built from, with `-dirty` for uncommitted changes.
@@ -19,10 +20,8 @@ pub const VERSION: &str = env!("GIT_VERSION");
 /// Period of the timer tick. It wakes `idle` so the main loop runs at least this often.
 const TICK: Duration = Duration::from_millis(100);
 
-const TAG_BOARD_REVISION: u32 = 0x0001_0002;
-const TAG_TEMPERATURE: u32 = 0x0003_0006;
-
 pub use heap::Stats as HeapStats;
+pub use mailbox::MailboxError;
 
 /// Turns on the MMU and caches and sets up the heap. Must be the first thing
 /// `kernel_main` does.
@@ -85,13 +84,30 @@ pub fn shutdown() -> ! {
     power::reset(power::Partition::Halt)
 }
 
-/// Board revision code, see
-/// <https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#raspberry-pi-revision-codes>.
-pub fn board_revision() -> Option<u32> {
-    mailbox::property(TAG_BOARD_REVISION, 0).map(|[revision, _]| revision)
+pub struct BoardInfo {
+    /// Board revision code, see
+    /// <https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#raspberry-pi-revision-codes>.
+    pub revision: u32,
+    /// Firmware build time, as a Unix timestamp.
+    pub firmware: u32,
+    /// Bytes of RAM left to the ARM cores; the GPU has the rest.
+    pub arm_memory: u32,
+    /// SoC temperature in thousandths of a degree Celsius.
+    pub millidegrees: u32,
 }
 
-/// SoC temperature in thousandths of a degree Celsius.
-pub fn temperature() -> Option<u32> {
-    mailbox::property(TAG_TEMPERATURE, 0).map(|[_, millidegrees]| millidegrees)
+/// Asks the firmware about the board, in a single mailbox message.
+pub fn board_info() -> Result<BoardInfo, MailboxError> {
+    let mut batch = Batch::new();
+    let revision = batch.add::<tags::GetBoardRevision>(());
+    let firmware = batch.add::<tags::GetFirmwareRevision>(());
+    let memory = batch.add::<tags::GetArmMemory>(());
+    let temperature = batch.add::<tags::GetTemperature>(tags::SensorId::SOC);
+    let replies = batch.send()?;
+    Ok(BoardInfo {
+        revision: replies.get(revision)?,
+        firmware: replies.get(firmware)?,
+        arm_memory: replies.get(memory)?.size,
+        millidegrees: replies.get(temperature)?.millidegrees,
+    })
 }

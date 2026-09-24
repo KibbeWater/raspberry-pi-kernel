@@ -17,7 +17,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("led on|off|toggle", "switch the status LED"),
     ("uptime", "time since reset"),
     ("version", "git commit the kernel was built from"),
-    ("info", "board revision, SoC temperature, EL and MMU"),
+    ("info", "board, firmware, memory, temperature, EL and MMU"),
     ("heap [test]", "heap usage, or run an allocator stress test"),
     ("reboot", "reset the board"),
     ("shutdown", "halt; pull GPIO3 low to boot again"),
@@ -173,15 +173,25 @@ struct Aligned(u8);
 fn info(reply: &mut Reply) {
     let el = sys::exception_level();
     let mmu = if sys::mmu_enabled() { "on" } else { "off" };
-    match (sys::board_revision(), sys::temperature()) {
-        (Some(revision), Some(millidegrees)) => reply.line(LineKind::Rsp, format_args!(
-            "board rev {:#x}, soc {}.{} C, EL{}, mmu {}",
-            revision,
-            millidegrees / 1000,
-            millidegrees % 1000 / 100,
-            el,
-            mmu,
-        )),
-        _ => reply.line(LineKind::Rsp, format_args!("firmware did not answer, EL{}, mmu {}", el, mmu)),
+    match sys::board_info() {
+        Ok(info) => {
+            reply.line(LineKind::Rsp, format_args!(
+                "board rev {:#x}, firmware {}, arm memory {} MB",
+                info.revision,
+                info.firmware,
+                info.arm_memory / (1024 * 1024),
+            ));
+            reply.line(LineKind::Rsp, format_args!(
+                "soc {}.{} C, EL{}, mmu {}",
+                info.millidegrees / 1000,
+                info.millidegrees % 1000 / 100,
+                el,
+                mmu,
+            ));
+        }
+        Err(error) => {
+            reply.line(LineKind::Rsp, format_args!("mailbox: {}", error));
+            reply.line(LineKind::Rsp, format_args!("EL{}, mmu {}", el, mmu));
+        }
     }
 }
