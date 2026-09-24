@@ -7,13 +7,13 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::{self, Write};
-use rustypi_abi::{Errno, Syscall, MAX_WRITE};
+use rustypi_abi::{Errno, Syscall, INPUT, MAX_WRITE};
 use crate::syscall;
 
 /// Reads input into `buf`, waiting until there is some. Returns how many bytes were read.
 /// Input comes a line at a time, each ending with `\n`.
 pub fn read(buf: &mut [u8]) -> Result<usize, Errno> {
-    let call = Syscall::Read { ptr: buf.as_mut_ptr() as u64, len: buf.len() as u64 };
+    let call = Syscall::Read { handle: INPUT, ptr: buf.as_mut_ptr() as u64, len: buf.len() as u64 };
     syscall::call(call).map(|read| read as usize)
 }
 

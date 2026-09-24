@@ -12,6 +12,7 @@
 //! it can sleep, block or be preempted like any kernel task, and its registers wait in the
 //! saved `ExceptionContext` until it returns.
 
+mod files;
 mod programs;
 
 pub use programs::{Program, PROGRAMS};
@@ -21,7 +22,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use core::fmt;
 use core::time::Duration;
-use rustypi_abi::{encode_result, Errno, Registers, Syscall, MAX_RANDOM, MAX_READ, MAX_WRITE, SVC_SYSCALL};
+use rustypi_abi::{encode_result, Errno, Registers, Syscall, INPUT, MAX_RANDOM, MAX_READ, MAX_WRITE, SVC_SYSCALL};
 use rustypi_abi::layout::{MAX_ARGS, PROGRAM_END, STACK_SIZE, STACK_TOP, USER_BASE};
 use rustypi_core::elf;
 use rustypi_core::paging::{Access, AddressSpace, MapError, PAGE_SIZE};
@@ -149,6 +150,8 @@ struct Running {
     heap_end: u64,
     /// Input sent to it and not read yet.
     input: VecDeque<u8>,
+    /// Files and directories it has open.
+    handles: files::Handles,
 }
 
 /// Most bytes of unread input a program can have waiting.
@@ -231,6 +234,7 @@ pub fn spawn(name: &str, code: Code, args: &str) -> Result<Process, SpawnError> 
         killed: false,
         heap_end: program_end.next_multiple_of(PAGE_SIZE as u64),
         input: VecDeque::new(),
+        handles: files::Handles::new(),
     };
     // Registered under the lock, so the program can't make a system call before it is known.
     let id = PROCESSES.lock(|processes| {
@@ -360,7 +364,12 @@ fn syscall(call: Syscall) -> Result<u64, Errno> {
         }
         Syscall::Uptime => Ok(timer::now_us()),
         Syscall::Map { len } => map(len),
-        Syscall::Read { ptr, len } => read(ptr, len),
+        Syscall::Read { handle: INPUT, ptr, len } => read_input(ptr, len),
+        Syscall::Read { handle, ptr, len } => files::read(handle, ptr, len),
+        Syscall::Open { path, len } => files::open(path, len),
+        Syscall::OpenDir { path, len } => files::open_dir(path, len),
+        Syscall::ReadDir { handle, entry } => files::read_dir(handle, entry),
+        Syscall::Close { handle } => files::close(handle),
         Syscall::Random { ptr, len } => random(ptr, len),
     }
 }
@@ -380,7 +389,7 @@ fn random(ptr: u64, len: u64) -> Result<u64, Errno> {
 
 /// Copies the running program's waiting input into its memory at `ptr`, waiting for some if
 /// there is none. A killed program stops waiting (and exits once the call returns).
-fn read(ptr: u64, len: u64) -> Result<u64, Errno> {
+fn read_input(ptr: u64, len: u64) -> Result<u64, Errno> {
     let id = sched::current();
     let len = len.min(MAX_READ as u64) as usize;
     if len == 0 {

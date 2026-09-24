@@ -97,6 +97,11 @@ pub fn read_dir(path: &str) -> Result<Vec<DirEntry>, FsError> {
     with_fs(|fs| Ok(fs.fat.read_dir(path)?))
 }
 
+/// Looks up a file or directory.
+pub fn metadata(path: &str) -> Result<DirEntry, FsError> {
+    with_fs(|fs| Ok(fs.fat.metadata(path)?))
+}
+
 /// Reads a whole file.
 pub fn read_file(path: &str) -> Result<Vec<u8>, FsError> {
     with_fs(|fs| Ok(fs.fat.read_file(path)?))

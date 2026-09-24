@@ -43,6 +43,19 @@ pub const MAX_READ: usize = 256;
 /// Most bytes one `Random` fills.
 pub const MAX_RANDOM: usize = 256;
 
+/// Longest path `Open` and `OpenDir` take, in bytes.
+pub const MAX_PATH: usize = 256;
+
+/// Biggest file `Open` takes, in bytes: the kernel reads it whole.
+pub const MAX_FILE: usize = 4 * 1024 * 1024;
+
+/// Most handles a program can have open at once, besides `INPUT`.
+pub const MAX_HANDLES: usize = 16;
+
+/// The handle every program starts with: what the user types while it runs in the
+/// foreground, a line at a time, each ending with `\n`.
+pub const INPUT: u64 = 0;
+
 /// Identifies a system call, in x8.
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +68,10 @@ pub enum Number {
     Map = 5,
     Read = 6,
     Random = 7,
+    Open = 8,
+    OpenDir = 9,
+    ReadDir = 10,
+    Close = 11,
 }
 
 impl Number {
@@ -68,6 +85,10 @@ impl Number {
             5 => Number::Map,
             6 => Number::Read,
             7 => Number::Random,
+            8 => Number::Open,
+            9 => Number::OpenDir,
+            10 => Number::ReadDir,
+            11 => Number::Close,
             _ => return None,
         })
     }
@@ -91,13 +112,22 @@ pub enum Syscall {
     /// follows straight on from the last. With `len` 0, returns where the next would start.
     /// `NoMemory` if the heap can't grow that far.
     Map { len: u64 },
-    /// Reads up to `len` bytes (at most `MAX_READ`) of input into `ptr`, waiting until there
-    /// is some. Returns how many were read. Input is what the user types while the program
-    /// runs in the foreground, a line at a time, each ending with `\n`.
-    Read { ptr: u64, len: u64 },
+    /// Reads up to `len` bytes (at most `MAX_READ`) from a handle into `ptr`. Returns how
+    /// many were read: 0 at the end of a file. Reading `INPUT` waits until there is some.
+    Read { handle: u64, ptr: u64, len: u64 },
     /// Fills up to `len` bytes (at most `MAX_RANDOM`) at `ptr` with random bytes from the
     /// hardware generator. Returns how many were filled.
     Random { ptr: u64, len: u64 },
+    /// Opens the file at the UTF-8 path `path..path + len` for reading. Returns a handle.
+    /// Paths start at the root of the SD card, with or without a leading `/`.
+    Open { path: u64, len: u64 },
+    /// Opens a directory, to list with `ReadDir`. Returns a handle.
+    OpenDir { path: u64, len: u64 },
+    /// Writes the directory's next [`DirEntry`] to `entry`. Returns 1, or 0 once all have
+    /// been read.
+    ReadDir { handle: u64, entry: u64 },
+    /// Closes a handle from `Open` or `OpenDir`. Exiting closes them all.
+    Close { handle: u64 },
 }
 
 /// The registers a system call is made with.
@@ -120,6 +150,10 @@ impl Syscall {
             Syscall::Map { .. } => Number::Map,
             Syscall::Read { .. } => Number::Read,
             Syscall::Random { .. } => Number::Random,
+            Syscall::Open { .. } => Number::Open,
+            Syscall::OpenDir { .. } => Number::OpenDir,
+            Syscall::ReadDir { .. } => Number::ReadDir,
+            Syscall::Close { .. } => Number::Close,
         }
     }
 
@@ -127,9 +161,11 @@ impl Syscall {
         let args = match *self {
             // Sign-extended, like any i32 in a 64-bit register.
             Syscall::Exit { code } => [code as i64 as u64, 0, 0, 0, 0, 0],
-            Syscall::Write { ptr, len } | Syscall::Read { ptr, len } | Syscall::Random { ptr, len } => {
-                [ptr, len, 0, 0, 0, 0]
-            }
+            Syscall::Write { ptr, len } | Syscall::Random { ptr, len } => [ptr, len, 0, 0, 0, 0],
+            Syscall::Read { handle, ptr, len } => [handle, ptr, len, 0, 0, 0],
+            Syscall::Open { path, len } | Syscall::OpenDir { path, len } => [path, len, 0, 0, 0, 0],
+            Syscall::ReadDir { handle, entry } => [handle, entry, 0, 0, 0, 0],
+            Syscall::Close { handle } => [handle, 0, 0, 0, 0, 0],
             Syscall::Sleep { micros } => [micros, 0, 0, 0, 0, 0],
             Syscall::Map { len } => [len, 0, 0, 0, 0, 0],
             Syscall::Yield | Syscall::Uptime => [0; 6],
@@ -140,7 +176,7 @@ impl Syscall {
     /// Unknown numbers are `NoSys`; arguments out of range for their type are `Invalid`.
     /// Arguments a call doesn't take are ignored.
     pub fn decode(registers: Registers) -> Result<Syscall, Errno> {
-        let [a0, a1, ..] = registers.args;
+        let [a0, a1, a2, ..] = registers.args;
         let number = Number::from_raw(registers.number).ok_or(Errno::NoSys)?;
         Ok(match number {
             Number::Exit => {
@@ -152,8 +188,12 @@ impl Syscall {
             Number::Sleep => Syscall::Sleep { micros: a0 },
             Number::Uptime => Syscall::Uptime,
             Number::Map => Syscall::Map { len: a0 },
-            Number::Read => Syscall::Read { ptr: a0, len: a1 },
+            Number::Read => Syscall::Read { handle: a0, ptr: a1, len: a2 },
             Number::Random => Syscall::Random { ptr: a0, len: a1 },
+            Number::Open => Syscall::Open { path: a0, len: a1 },
+            Number::OpenDir => Syscall::OpenDir { path: a0, len: a1 },
+            Number::ReadDir => Syscall::ReadDir { handle: a0, entry: a1 },
+            Number::Close => Syscall::Close { handle: a0 },
         })
     }
 }
@@ -169,6 +209,18 @@ pub enum Errno {
     Fault,
     /// There isn't enough memory, or room in the address space.
     NoMemory,
+    /// No file or directory has that path.
+    NotFound,
+    /// It's a directory, where a file was wanted.
+    IsADirectory,
+    /// It's not a directory, where one was wanted.
+    NotADirectory,
+    /// Not an open handle, or the wrong kind for the call.
+    BadHandle,
+    /// Too many open already (handles, or programs).
+    TooMany,
+    /// The SD card or its filesystem failed.
+    Io,
     /// A code this version of the ABI doesn't know, from a newer kernel.
     Unknown,
 }
@@ -181,6 +233,12 @@ impl Errno {
             Errno::Invalid => 2,
             Errno::Fault => 3,
             Errno::NoMemory => 4,
+            Errno::NotFound => 5,
+            Errno::IsADirectory => 6,
+            Errno::NotADirectory => 7,
+            Errno::BadHandle => 8,
+            Errno::TooMany => 9,
+            Errno::Io => 10,
             Errno::Unknown => 4095,
         }
     }
@@ -191,8 +249,65 @@ impl Errno {
             2 => Errno::Invalid,
             3 => Errno::Fault,
             4 => Errno::NoMemory,
+            5 => Errno::NotFound,
+            6 => Errno::IsADirectory,
+            7 => Errno::NotADirectory,
+            8 => Errno::BadHandle,
+            9 => Errno::TooMany,
+            10 => Errno::Io,
             _ => Errno::Unknown,
         }
+    }
+}
+
+/// One directory entry, as `ReadDir` writes it into program memory. Laid out without padding,
+/// so it is plain bytes on both sides.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirEntry {
+    /// Bytes; 0 for directories.
+    pub size: u64,
+    name_len: u16,
+    kind: u8,
+    _reserved: [u8; 5],
+    name: [u8; MAX_NAME],
+}
+
+/// Longest name a `DirEntry` holds, in bytes. Longer names are cut at a character boundary.
+pub const MAX_NAME: usize = 248;
+
+const _: () = assert!(size_of::<DirEntry>() == 8 + 2 + 1 + 5 + MAX_NAME, "DirEntry has padding");
+
+const KIND_FILE: u8 = 0;
+const KIND_DIRECTORY: u8 = 1;
+
+impl DirEntry {
+    pub const EMPTY: DirEntry = DirEntry { size: 0, name_len: 0, kind: KIND_FILE, _reserved: [0; 5], name: [0; MAX_NAME] };
+
+    pub fn new(name: &str, is_dir: bool, size: u64) -> Self {
+        let mut len = name.len().min(MAX_NAME);
+        while !name.is_char_boundary(len) {
+            len -= 1;
+        }
+        let mut entry = DirEntry { size, name_len: len as u16, kind: if is_dir { KIND_DIRECTORY } else { KIND_FILE }, ..DirEntry::EMPTY };
+        entry.name[..len].copy_from_slice(&name.as_bytes()[..len]);
+        entry
+    }
+
+    /// The name, or `""` if the bytes (from a buggy kernel) aren't valid.
+    pub fn name(&self) -> &str {
+        let len = (self.name_len as usize).min(MAX_NAME);
+        core::str::from_utf8(&self.name[..len]).unwrap_or("")
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.kind == KIND_DIRECTORY
+    }
+
+    /// Its bytes, as the kernel copies them into program memory.
+    pub fn as_bytes(&self) -> &[u8] {
+        // repr(C) with no padding (checked above): every byte is initialized.
+        unsafe { core::slice::from_raw_parts((self as *const DirEntry).cast(), size_of::<DirEntry>()) }
     }
 }
 
@@ -222,7 +337,7 @@ pub const fn decode_result(x0: u64) -> Result<u64, Errno> {
 mod tests {
     use super::*;
 
-    const ALL: [Syscall; 9] = [
+    const ALL: [Syscall; 13] = [
         Syscall::Exit { code: 0 },
         Syscall::Exit { code: -7 },
         Syscall::Write { ptr: 0x8000_0000, len: 12 },
@@ -230,8 +345,12 @@ mod tests {
         Syscall::Sleep { micros: 1_500 },
         Syscall::Uptime,
         Syscall::Map { len: 8192 },
-        Syscall::Read { ptr: 0x8000_1000, len: 64 },
+        Syscall::Read { handle: 3, ptr: 0x8000_1000, len: 64 },
         Syscall::Random { ptr: 0x8000_2000, len: 16 },
+        Syscall::Open { path: 0x8000_3000, len: 9 },
+        Syscall::OpenDir { path: 0x8000_3000, len: 4 },
+        Syscall::ReadDir { handle: 2, entry: 0x8000_4000 },
+        Syscall::Close { handle: 2 },
     ];
 
     #[test]
@@ -272,7 +391,19 @@ mod tests {
 
     #[test]
     fn results_survive_encoding() {
-        let errors = [Errno::NoSys, Errno::Invalid, Errno::Fault, Errno::NoMemory].map(Err);
+        let errors = [
+            Errno::NoSys,
+            Errno::Invalid,
+            Errno::Fault,
+            Errno::NoMemory,
+            Errno::NotFound,
+            Errno::IsADirectory,
+            Errno::NotADirectory,
+            Errno::BadHandle,
+            Errno::TooMany,
+            Errno::Io,
+        ]
+        .map(Err);
         for result in [Ok(0), Ok(42), Ok(MAX_RESULT)].into_iter().chain(errors) {
             assert_eq!(decode_result(encode_result(result)), result);
         }
@@ -283,6 +414,24 @@ mod tests {
     fn unknown_error_codes_decode_as_unknown() {
         assert_eq!(decode_result(-77i64 as u64), Err(Errno::Unknown));
         assert_eq!(decode_result(u64::MAX - MAX_RESULT), Err(Errno::Unknown)); // i64::MIN
+    }
+
+    #[test]
+    fn dir_entries_keep_their_fields() {
+        let entry = DirEntry::new("kernel8.img", false, 201_832);
+        assert_eq!((entry.name(), entry.is_dir(), entry.size), ("kernel8.img", false, 201_832));
+        assert!(DirEntry::new("bin", true, 0).is_dir());
+        assert_eq!(entry.as_bytes().len(), size_of::<DirEntry>());
+    }
+
+    #[test]
+    fn long_names_are_cut_at_a_character_boundary() {
+        let long = "é".repeat(200); // 400 bytes
+        let entry = DirEntry::new(&long, false, 0);
+        assert_eq!(entry.name(), "é".repeat(MAX_NAME / 2));
+        // Here the cut would fall in the middle of an "é".
+        let odd = format!("x{}", "é".repeat(200));
+        assert_eq!(DirEntry::new(&odd, false, 0).name().len(), MAX_NAME - 1);
     }
 
     #[test]
