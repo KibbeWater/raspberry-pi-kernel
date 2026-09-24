@@ -130,6 +130,7 @@ pub fn make_uncached(start: usize, len: usize) {
 }
 
 /// The kernel's level 1 table, which program address spaces copy their kernel entries from.
+#[allow(clippy::deref_addrof, reason = "a plain `&LEVEL1` would reference a `static mut`")]
 pub fn kernel_table() -> &'static Table {
     unsafe { &*&raw const LEVEL1 }
 }

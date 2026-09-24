@@ -149,7 +149,7 @@ impl Heap {
             let end = start + size;
             let prev_end = if prev.is_null() { 0 } else { prev as usize + (*prev).size };
             if start < prev_end || (!next.is_null() && end > next as usize) {
-                panic!("heap: freeing {:#x}..{:#x}, which is already free", start, end);
+                panic!("heap: freeing {start:#x}..{end:#x}, which is already free");
             }
 
             let mut size = size;
@@ -301,7 +301,7 @@ mod tests {
                 assert_eq!(p % l.align(), 0);
                 assert!(p >= start && p + l.size() <= start + SIZE);
                 for &(q, ql, _) in &live {
-                    assert!(p + l.size() <= q || q + ql.size() <= p, "overlap in round {}", round);
+                    assert!(p + l.size() <= q || q + ql.size() <= p, "overlap in round {round}");
                 }
                 let tag = (round % 251) as u8;
                 unsafe { core::ptr::write_bytes(p as *mut u8, tag, l.size()) };

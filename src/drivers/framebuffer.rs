@@ -39,7 +39,7 @@ impl From<MailboxError> for FramebufferError {
 impl fmt::Display for FramebufferError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            FramebufferError::Mailbox(error) => write!(f, "mailbox: {}", error),
+            FramebufferError::Mailbox(error) => write!(f, "mailbox: {error}"),
             FramebufferError::Depth(depth) => write!(f, "got {} bits per pixel, need 32", depth.0),
             FramebufferError::Layout { size, pitch, bytes } => write!(
                 f,

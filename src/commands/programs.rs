@@ -45,7 +45,7 @@ fn run_program<'a>(shell: &mut Shell, args: &'a str, reply: &mut Reply) -> Outco
     }
     match find(program) {
         Some(target) => start(shell, target, args, background, reply),
-        None => reply.line(LineKind::Rsp, format_args!("run: no program '{}' in /bin or built in", program)),
+        None => reply.line(LineKind::Rsp, format_args!("run: no program '{program}' in /bin or built in")),
     }
     Outcome::Done
 }
@@ -69,7 +69,7 @@ pub(super) fn find(program: &str) -> Option<Target> {
     if program.contains('/') {
         return Some(Target::File(program.into()));
     }
-    let path = format!("/bin/{}", program);
+    let path = format!("/bin/{program}");
     if sys::fs::metadata(&path).is_ok_and(|entry| entry.kind == EntryKind::File) {
         return Some(Target::File(path));
     }
@@ -82,7 +82,7 @@ pub(super) fn start(shell: &mut Shell, target: Target, args: &str, background: b
         Target::File(path) => {
             let file = match sys::fs::read_file(path) {
                 Ok(file) => file,
-                Err(error) => return reply.line(LineKind::Rsp, format_args!("run: {}: {}", path, error)),
+                Err(error) => return reply.line(LineKind::Rsp, format_args!("run: {path}: {error}")),
             };
             let elf = match elf::parse(&file) {
                 Ok(elf) => elf,
@@ -105,7 +105,7 @@ pub(super) fn start(shell: &mut Shell, target: Target, args: &str, background: b
                 process.id().0,
             ));
         }
-        Err(error) => reply.line(LineKind::Rsp, format_args!("run: {}", error)),
+        Err(error) => reply.line(LineKind::Rsp, format_args!("run: {error}")),
     }
 }
 
@@ -115,8 +115,8 @@ fn kill<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     };
     match process::kill(TaskId(id)) {
         // The exit line follows once it has stopped.
-        Ok(()) => reply.line(LineKind::Rsp, format_args!("killing task {}", id)),
-        Err(error) => reply.line(LineKind::Rsp, format_args!("kill: task {}: {}", id, error)),
+        Ok(()) => reply.line(LineKind::Rsp, format_args!("killing task {id}")),
+        Err(error) => reply.line(LineKind::Rsp, format_args!("kill: task {id}: {error}")),
     }
     Outcome::Done
 }

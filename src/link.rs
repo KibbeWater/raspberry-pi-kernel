@@ -40,7 +40,7 @@ impl Link {
 
 /// Sends one frame. The payload must not contain `$` or `\n`.
 pub fn send(kind: &str, payload: &str) {
-    send_fmt(kind, format_args!("{}", payload));
+    send_fmt(kind, format_args!("{payload}"));
 }
 
 /// Sends one frame with a formatted payload, without needing an allocator:

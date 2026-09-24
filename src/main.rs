@@ -1,5 +1,7 @@
 #![no_std]
 #![no_main]
+// Register maps list every offset, `+ 0x00` included.
+#![allow(clippy::identity_op)]
 
 extern crate alloc;
 
@@ -98,7 +100,7 @@ fn link_task() {
             "MSG" => match session::request_seq(payload) {
                 // The shell has it already: tell the Uno to keep waiting.
                 Some(seq) if PENDING.load(Ordering::Relaxed) == seq as u32 + 1 => {
-                    link::send_fmt("BUSY", format_args!("{}", seq));
+                    link::send_fmt("BUSY", format_args!("{seq}"));
                 }
                 seq => {
                     if let Some(seq) = seq {
@@ -108,7 +110,7 @@ fn link_task() {
                     deliver(Inbound::Msg(payload.into()));
                 }
             },
-            _ => link::send_fmt("ERR", format_args!("unknown kind {}", kind)),
+            _ => link::send_fmt("ERR", format_args!("unknown kind {kind}")),
         });
         LINK_STATS.lock(|stats| *stats = *link.stats());
         sched::wait_until(sched::UART_RX, Uart::has_input);

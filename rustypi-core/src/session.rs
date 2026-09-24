@@ -64,13 +64,19 @@ impl Reply {
 
     /// Adds a plain reply line.
     pub fn rsp(&mut self, text: &str) {
-        self.line(LineKind::Rsp, format_args!("{}", text));
+        self.line(LineKind::Rsp, format_args!("{text}"));
     }
 }
 
 pub struct Session {
     last_seq: Option<u16>,
     reply: Reply,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Session {
@@ -110,7 +116,7 @@ impl Session {
 
     fn send_reply(&self, seq: u16, send: &mut impl FnMut(&str, fmt::Arguments)) {
         for (index, (kind, text)) in self.reply.lines.iter().enumerate() {
-            send(kind.frame_kind(), format_args!("{},{},{}", seq, index, text));
+            send(kind.frame_kind(), format_args!("{seq},{index},{text}"));
         }
         send("END", format_args!("{},{}", seq, self.reply.lines.len()));
     }
@@ -151,14 +157,14 @@ mod tests {
                         reply.rsp("rebooting");
                         return Some("reboot");
                     }
-                    _ => reply.line(LineKind::Rsp, format_args!("echo: {}", text)),
+                    _ => reply.line(LineKind::Rsp, format_args!("echo: {text}")),
                 }
                 None
             },
-            |kind, payload| sent.push(format!("{} {}", kind, payload)),
+            |kind, payload| sent.push(format!("{kind} {payload}")),
         );
         if let Some(action) = action {
-            sent.push(format!("action {}", action));
+            sent.push(format!("action {action}"));
         }
         sent
     }
@@ -236,7 +242,7 @@ mod tests {
     fn the_longest_line_text_fits_the_largest_frame() {
         let mut frame = String::new();
         let text = "x".repeat(MAX_TEXT);
-        crate::link::write_frame(&mut frame, "HELP", format_args!("65535,99,{}", text)).unwrap();
+        crate::link::write_frame(&mut frame, "HELP", format_args!("65535,99,{text}")).unwrap();
         assert_eq!(frame.trim_end().len(), crate::link::MAX_LINE);
     }
 
@@ -244,7 +250,7 @@ mod tests {
     fn long_lines_are_cut_at_a_character_boundary() {
         let mut reply = Reply::new();
         let long = "é".repeat(MAX_TEXT); // twice MAX_TEXT bytes
-        reply.line(LineKind::Rsp, format_args!("{}", long));
+        reply.line(LineKind::Rsp, format_args!("{long}"));
         let text = &reply.lines[0].1;
         assert!(text.len() <= MAX_TEXT);
         assert_eq!(*text, "é".repeat(MAX_TEXT / 2));

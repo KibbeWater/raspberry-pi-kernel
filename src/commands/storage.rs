@@ -28,7 +28,7 @@ fn write<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     line.push(b'\n');
     match sys::fs::write_file(path, &line) {
         Ok(()) => reply.line(LineKind::Rsp, format_args!("wrote {} bytes to {}", line.len(), path)),
-        Err(error) => reply.line(LineKind::Rsp, format_args!("write: {}: {}", path, error)),
+        Err(error) => reply.line(LineKind::Rsp, format_args!("write: {path}: {error}")),
     }
     Outcome::Done
 }
@@ -38,7 +38,7 @@ fn rm<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
         return Outcome::Usage;
     }
     if let Err(error) = sys::fs::remove(args) {
-        reply.line(LineKind::Rsp, format_args!("rm: {}: {}", args, error));
+        reply.line(LineKind::Rsp, format_args!("rm: {args}: {error}"));
     }
     Outcome::Done
 }
@@ -48,7 +48,7 @@ fn mkdir<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
         return Outcome::Usage;
     }
     if let Err(error) = sys::fs::create_dir(args) {
-        reply.line(LineKind::Rsp, format_args!("mkdir: {}: {}", args, error));
+        reply.line(LineKind::Rsp, format_args!("mkdir: {args}: {error}"));
     }
     Outcome::Done
 }
@@ -68,7 +68,7 @@ fn sd<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
                     if patterns { "ok" } else { "wrong" },
                     if restored { "ok" } else { "wrong" },
                 )),
-                Err(error) => reply.line(LineKind::Rsp, format_args!("write test: {}", error)),
+                Err(error) => reply.line(LineKind::Rsp, format_args!("write test: {error}")),
             }
             return Outcome::Done;
         }
@@ -77,7 +77,7 @@ fn sd<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     let info = match sys::fs::info() {
         Ok(info) => info,
         Err(error) => {
-            reply.line(LineKind::Rsp, format_args!("{}", error));
+            reply.line(LineKind::Rsp, format_args!("{error}"));
             return Outcome::Done;
         }
     };
@@ -108,7 +108,7 @@ fn sd<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     }
     match sys::fs::free_space() {
         Ok(bytes) => reply.line(LineKind::Rsp, format_args!("free: {} MB", bytes / (1024 * 1024))),
-        Err(error) => reply.line(LineKind::Rsp, format_args!("free: {}", error)),
+        Err(error) => reply.line(LineKind::Rsp, format_args!("free: {error}")),
     }
     Outcome::Done
 }
@@ -151,7 +151,7 @@ fn ls<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     let entries = match sys::fs::read_dir(path) {
         Ok(entries) => entries,
         Err(error) => {
-            reply.line(LineKind::Rsp, format_args!("{}: {}", path, error));
+            reply.line(LineKind::Rsp, format_args!("{path}: {error}"));
             return Outcome::Done;
         }
     };
@@ -178,7 +178,7 @@ fn cat<'a>(_: &mut Shell, path: &'a str, reply: &mut Reply) -> Outcome<'a> {
     let data = match sys::fs::read_file(path) {
         Ok(data) => data,
         Err(error) => {
-            reply.line(LineKind::Rsp, format_args!("{}: {}", path, error));
+            reply.line(LineKind::Rsp, format_args!("{path}: {error}"));
             return Outcome::Done;
         }
     };

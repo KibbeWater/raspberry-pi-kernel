@@ -115,15 +115,15 @@ impl fmt::Display for MailboxError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             MailboxError::Firmware => write!(f, "firmware rejected the message"),
-            MailboxError::Unanswered { tag } => write!(f, "tag {:#x} not answered", tag),
+            MailboxError::Unanswered { tag } => write!(f, "tag {tag:#x} not answered"),
             MailboxError::Truncated { tag, needed, capacity } => {
-                write!(f, "tag {:#x} response needs {} bytes, room for {}", tag, needed, capacity)
+                write!(f, "tag {tag:#x} response needs {needed} bytes, room for {capacity}")
             }
             MailboxError::ShortResponse { tag, len, expected } => {
-                write!(f, "tag {:#x} response is {} bytes, expected {}", tag, len, expected)
+                write!(f, "tag {tag:#x} response is {len} bytes, expected {expected}")
             }
             MailboxError::BatchFull => write!(f, "too many tags for one message"),
-            MailboxError::WrongBatch { tag } => write!(f, "tag {:#x} handle is from another batch", tag),
+            MailboxError::WrongBatch { tag } => write!(f, "tag {tag:#x} handle is from another batch"),
         }
     }
 }
@@ -150,6 +150,12 @@ pub struct Batch {
     /// Words used so far, including the two-word message header.
     len: usize,
     full: bool,
+}
+
+impl Default for Batch {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Batch {
@@ -257,8 +263,10 @@ mod tests {
 
     /// Answers each tag with `respond(id, request value words)`, or leaves it unanswered on
     /// `None`, like the firmware. Remembers the last message it was sent.
+    type Respond = Box<dyn Fn(u32, &[u32]) -> Option<Vec<u32>>>;
+
     struct FakeFirmware {
-        respond: Box<dyn Fn(u32, &[u32]) -> Option<Vec<u32>>>,
+        respond: Respond,
         last: RefCell<Vec<u32>>,
     }
 

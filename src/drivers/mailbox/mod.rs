@@ -9,8 +9,7 @@
 //! ```
 
 // The typed interface, re-exported so drivers only need this module.
-#[allow(unused_imports)]
-pub use rustypi_core::mailbox::{query, tags, Batch, BusAddress, Handle, MailboxError, Replies, Tag, Words};
+pub use rustypi_core::mailbox::{query, tags, Batch, MailboxError};
 
 use rustypi_core::mailbox::{Message, Transport};
 

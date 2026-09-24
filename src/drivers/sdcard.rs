@@ -204,14 +204,14 @@ pub enum SdError {
 impl fmt::Display for SdError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            SdError::Timeout(what) => write!(f, "timed out waiting for {}", what),
+            SdError::Timeout(what) => write!(f, "timed out waiting for {what}"),
             SdError::Command { index, interrupt } => {
-                write!(f, "CMD{} failed (interrupt {:#x})", index, interrupt)
+                write!(f, "CMD{index} failed (interrupt {interrupt:#x})")
             }
-            SdError::BadIfCond(response) => write!(f, "bad CMD8 response {:#x}", response),
-            SdError::Clock(error) => write!(f, "clock: {}", error),
+            SdError::BadIfCond(response) => write!(f, "bad CMD8 response {response:#x}"),
+            SdError::Clock(error) => write!(f, "clock: {error}"),
             SdError::NoClock => write!(f, "EMMC clock is off"),
-            SdError::OutOfRange(lba) => write!(f, "{} out of range", lba),
+            SdError::OutOfRange(lba) => write!(f, "{lba} out of range"),
         }
     }
 }

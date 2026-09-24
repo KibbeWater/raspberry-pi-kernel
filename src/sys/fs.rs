@@ -41,9 +41,9 @@ impl From<FatError<SdError>> for FsError {
 impl fmt::Display for FsError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            FsError::Card(error) => write!(f, "sd card: {}", error),
+            FsError::Card(error) => write!(f, "sd card: {error}"),
             FsError::NoFatVolume => write!(f, "no FAT volume on the card"),
-            FsError::Fat(error) => write!(f, "{}", error),
+            FsError::Fat(error) => write!(f, "{error}"),
             FsError::NotMounted => write!(f, "no filesystem mounted"),
             FsError::NoSpareBlocks => write!(f, "no blocks before the first partition to test on"),
             FsError::Protected => write!(f, "the Pi needs it to boot, so it can't be changed"),

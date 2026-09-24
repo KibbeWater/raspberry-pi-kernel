@@ -142,7 +142,7 @@ fn alias(name: &str, taken: &[[u8; 11]]) -> [u8; 11] {
     let mut short = [b' '; 11];
     short[8..8 + ext.len()].copy_from_slice(&ext);
     for n in 1u32.. {
-        let tail = alloc::format!("~{}", n);
+        let tail = alloc::format!("~{n}");
         let keep = basis.len().min(8 - tail.len());
         short[..8].fill(b' ');
         short[..keep].copy_from_slice(&basis[..keep]);
@@ -697,12 +697,12 @@ mod tests {
         for mut fat in volumes() {
             fat.create_dir("/many").unwrap();
             for i in 0..40 {
-                fat.write_file(&format!("/many/file number {} with a long name.txt", i), &bytes(i * 10, i as u8)).unwrap();
+                fat.write_file(&format!("/many/file number {i} with a long name.txt"), &bytes(i * 10, i as u8)).unwrap();
             }
             let entries = fat.read_dir("/many").unwrap();
             assert_eq!(entries.len(), 40);
             for i in 0..40 {
-                let path = format!("/many/file number {} with a long name.txt", i);
+                let path = format!("/many/file number {i} with a long name.txt");
                 assert_eq!(fat.read_file(&path).unwrap(), bytes(i * 10, i as u8));
             }
         }
@@ -726,7 +726,7 @@ mod tests {
         let mut i = 0;
         let error = loop {
             let free = fat.free_clusters().unwrap();
-            match fat.write_file(&format!("/a rather long file name number {}.txt", i), b"data") {
+            match fat.write_file(&format!("/a rather long file name number {i}.txt"), b"data") {
                 Ok(()) => i += 1,
                 Err(error) => {
                     assert_eq!(fat.free_clusters().unwrap(), free);

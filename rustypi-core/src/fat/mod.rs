@@ -81,11 +81,11 @@ impl<E> From<E> for FatError<E> {
 impl<E: fmt::Display> fmt::Display for FatError<E> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            FatError::Device(error) => write!(f, "device: {}", error),
-            FatError::NotFat(reason) => write!(f, "not a FAT volume: {}", reason),
-            FatError::UnsupportedSectorSize(size) => write!(f, "{}-byte sectors not supported", size),
+            FatError::Device(error) => write!(f, "device: {error}"),
+            FatError::NotFat(reason) => write!(f, "not a FAT volume: {reason}"),
+            FatError::UnsupportedSectorSize(size) => write!(f, "{size}-byte sectors not supported"),
             FatError::Fat12 => write!(f, "FAT12 not supported"),
-            FatError::BadCluster(cluster) => write!(f, "bad cluster {}", cluster),
+            FatError::BadCluster(cluster) => write!(f, "bad cluster {cluster}"),
             FatError::ChainLoop => write!(f, "cluster chain loops"),
             FatError::Truncated => write!(f, "file shorter than its size"),
             FatError::NotFound => write!(f, "not found"),
@@ -264,10 +264,6 @@ impl<D: BlockDevice> Fat<D> {
 
     pub fn cluster_count(&self) -> u32 {
         self.cluster_count
-    }
-
-    pub fn into_device(self) -> D {
-        self.device
     }
 
     /// Lists a directory. `path` is absolute, `/`-separated and matched case-insensitively,
@@ -630,7 +626,7 @@ mod tests {
             let entry = fat.metadata("/kernel8 image with a long name.img").unwrap();
             let before = fat.device.commands;
             assert_eq!(fat.read_chain(entry.first_cluster(), Some(entry.size as usize)).unwrap(), big);
-            assert_eq!(fat.device.commands - before, commands, "scatter {}", scatter);
+            assert_eq!(fat.device.commands - before, commands, "scatter {scatter}");
         }
     }
 

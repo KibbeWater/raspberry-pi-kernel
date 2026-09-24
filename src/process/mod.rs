@@ -71,7 +71,7 @@ impl Fault {
 impl fmt::Display for Exit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Exit::Code(code) => write!(f, "exited {}", code),
+            Exit::Code(code) => write!(f, "exited {code}"),
             Exit::Killed => write!(f, "killed"),
             Exit::Crashed(fault) => write!(
                 f,
@@ -98,7 +98,7 @@ impl fmt::Display for SpawnError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             SpawnError::TooManyPrograms => write!(f, "too many programs running (at most {})", Asid::COUNT - 1),
-            SpawnError::ArgsTooLong => write!(f, "arguments longer than {} bytes", MAX_ARGS),
+            SpawnError::ArgsTooLong => write!(f, "arguments longer than {MAX_ARGS} bytes"),
             SpawnError::OutOfMemory => write!(f, "out of memory"),
         }
     }

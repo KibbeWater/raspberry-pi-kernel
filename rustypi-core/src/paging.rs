@@ -232,7 +232,7 @@ impl AddressSpace {
     /// Where `va` is in physical memory, and how the program may use it.
     pub fn translate(&self, va: u64) -> Option<(u64, Access)> {
         let descriptor = self.descriptor(va)?;
-        Some((descriptor & ADDRESS | va % PAGE, Access::from_descriptor(descriptor)?))
+        Some(((descriptor & ADDRESS) | (va % PAGE), Access::from_descriptor(descriptor)?))
     }
 
     /// Calls `f` with each page-sized piece of `va..va + len`: its physical address, its

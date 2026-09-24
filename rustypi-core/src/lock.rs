@@ -26,6 +26,12 @@ pub struct LockState {
     waiters: VecDeque<TaskId>,
 }
 
+impl Default for LockState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LockState {
     pub const fn new() -> Self {
         LockState { owner: None, waiters: VecDeque::new() }

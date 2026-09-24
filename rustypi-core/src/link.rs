@@ -51,6 +51,12 @@ pub struct Receiver {
     pub stats: Stats,
 }
 
+impl Default for Receiver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Receiver {
     pub const fn new() -> Self {
         Receiver {
@@ -239,7 +245,7 @@ mod tests {
 
     fn frame(kind: &str, payload: &str) -> String {
         let mut out = String::new();
-        write_frame(&mut out, kind, format_args!("{}", payload)).unwrap();
+        write_frame(&mut out, kind, format_args!("{payload}")).unwrap();
         out
     }
 
@@ -249,8 +255,8 @@ mod tests {
         for &byte in input {
             receiver.push(Ok(byte), |event| {
                 events.push(match event {
-                    Event::Frame { kind, payload } => format!("{}|{}", kind, payload),
-                    Event::Rejected(reason) => format!("ERR {}", reason),
+                    Event::Frame { kind, payload } => format!("{kind}|{payload}"),
+                    Event::Rejected(reason) => format!("ERR {reason}"),
                 })
             });
         }

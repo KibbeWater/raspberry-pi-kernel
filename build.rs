@@ -17,6 +17,6 @@ fn main() {
 
     // Rebuild when the commit or the working tree changes.
     for path in [".git/HEAD", ".git/index", ".git/refs", "src", "rustypi-core", "build.rs", "linker.ld", "Cargo.toml"] {
-        println!("cargo:rerun-if-changed={}", path);
+        println!("cargo:rerun-if-changed={path}");
     }
 }

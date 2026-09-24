@@ -52,7 +52,7 @@ fn uptime<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome
 fn random<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     let value = sys::random::u64();
     match args {
-        "" => reply.line(LineKind::Rsp, format_args!("{}", value)),
+        "" => reply.line(LineKind::Rsp, format_args!("{value}")),
         // Slightly biased towards small numbers for huge bounds; fine for a shell command.
         below => match below.parse::<u64>() {
             Ok(below) if below > 0 => reply.line(LineKind::Rsp, format_args!("{}", value % below)),
@@ -93,8 +93,8 @@ fn info<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome<'
             ));
         }
         Err(error) => {
-            reply.line(LineKind::Rsp, format_args!("mailbox: {}", error));
-            reply.line(LineKind::Rsp, format_args!("EL{}, mmu {}", el, mmu));
+            reply.line(LineKind::Rsp, format_args!("mailbox: {error}"));
+            reply.line(LineKind::Rsp, format_args!("EL{el}, mmu {mmu}"));
         }
     }
     Outcome::Done

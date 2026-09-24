@@ -134,7 +134,7 @@ impl Shell {
                 let (args, background) = programs::split_background(args);
                 programs::start(self, target, args, background, reply);
             } else {
-                reply.line(LineKind::Rsp, format_args!("unknown command '{}', try help", name));
+                reply.line(LineKind::Rsp, format_args!("unknown command '{name}', try help"));
             }
             return None;
         };
