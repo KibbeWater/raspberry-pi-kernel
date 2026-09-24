@@ -3,6 +3,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use rustypi_core::paging::PAGE_SIZE;
 use rustypi_core::session::{LineKind, Reply};
 use super::{Command, Outcome, Shell};
 use crate::sys;
@@ -31,8 +32,8 @@ fn usage(reply: &mut Reply) {
     let pages = sys::memory::stats();
     reply.line(LineKind::Rsp, format_args!(
         "pages {} KB used by programs, of {} MB",
-        (pages.total - pages.free) * 4,
-        pages.total * 4 / 1024,
+        (pages.total - pages.free) * PAGE_SIZE / 1024,
+        pages.total * PAGE_SIZE / (1024 * 1024),
     ));
 }
 

@@ -34,22 +34,25 @@ fn write<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     Outcome::Done
 }
 
-fn rm<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
-    if args.is_empty() || args.contains(char::is_whitespace) {
+/// Paths are the whole argument, since FAT names can have spaces in them.
+fn rm<'a>(_: &mut Shell, path: &'a str, reply: &mut Reply) -> Outcome<'a> {
+    if path.is_empty() {
         return Outcome::Usage;
     }
-    if let Err(error) = sys::fs::remove(args) {
-        reply.line(LineKind::Rsp, format_args!("rm: {args}: {error}"));
+    match sys::fs::remove(path) {
+        Ok(()) => reply.line(LineKind::Rsp, format_args!("removed {path}")),
+        Err(error) => reply.line(LineKind::Rsp, format_args!("rm: {path}: {error}")),
     }
     Outcome::Done
 }
 
-fn mkdir<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
-    if args.is_empty() || args.contains(char::is_whitespace) {
+fn mkdir<'a>(_: &mut Shell, path: &'a str, reply: &mut Reply) -> Outcome<'a> {
+    if path.is_empty() {
         return Outcome::Usage;
     }
-    if let Err(error) = sys::fs::create_dir(args) {
-        reply.line(LineKind::Rsp, format_args!("mkdir: {args}: {error}"));
+    match sys::fs::create_dir(path) {
+        Ok(()) => reply.line(LineKind::Rsp, format_args!("made directory {path}")),
+        Err(error) => reply.line(LineKind::Rsp, format_args!("mkdir: {path}: {error}")),
     }
     Outcome::Done
 }
@@ -78,7 +81,7 @@ fn sd<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     let info = match sys::fs::info() {
         Ok(info) => info,
         Err(error) => {
-            reply.line(LineKind::Rsp, format_args!("{error}"));
+            reply.line(LineKind::Rsp, format_args!("sd: {error}"));
             return Outcome::Done;
         }
     };
@@ -145,17 +148,14 @@ fn bench(reply: &mut Reply) {
 /// given.
 fn ls<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     let (all, path) = match args.strip_prefix("-a") {
-        Some(rest) if rest.is_empty() || rest.starts_with(' ') => (true, rest.trim()),
+        Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => (true, rest.trim()),
         _ => (false, args),
     };
-    if path.contains(char::is_whitespace) {
-        return Outcome::Usage;
-    }
     let path = if path.is_empty() { "/" } else { path };
     let entries = match sys::fs::read_dir(path) {
         Ok(entries) => entries,
         Err(error) => {
-            reply.line(LineKind::Rsp, format_args!("{path}: {error}"));
+            reply.line(LineKind::Rsp, format_args!("ls: {path}: {error}"));
             return Outcome::Done;
         }
     };
@@ -182,7 +182,7 @@ fn cat<'a>(_: &mut Shell, path: &'a str, reply: &mut Reply) -> Outcome<'a> {
     let data = match sys::fs::read_file(path) {
         Ok(data) => data,
         Err(error) => {
-            reply.line(LineKind::Rsp, format_args!("{path}: {error}"));
+            reply.line(LineKind::Rsp, format_args!("cat: {path}: {error}"));
             return Outcome::Done;
         }
     };

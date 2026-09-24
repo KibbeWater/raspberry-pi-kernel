@@ -2,7 +2,7 @@
 //! Commands about the system as a whole: time, version, board info, power and crash tests.
 
 use rustypi_core::session::{LineKind, Reply};
-use super::{Command, Outcome};
+use super::{Command, Outcome, Shell};
 use crate::sys;
 
 /// Something a command does after its reply has been sent, because it ends the kernel.
@@ -33,7 +33,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "uptime", args: "", description: "time since reset", run: uptime },
     Command { name: "version", args: "", description: "git commit the kernel was built from", run: version },
     Command { name: "info", args: "", description: "board, firmware, memory, temperature, EL, MMU", run: info },
-    Command { name: "echo", args: "<text>", description: "reply with the text", run: echo },
+    Command { name: "echo", args: "[text]", description: "reply with the text", run: echo },
     Command { name: "random", args: "[below]", description: "a random number from the hardware generator", run: random },
     Command { name: "reboot", args: "", description: "reset the board", run: reboot },
     Command { name: "shutdown", args: "", description: "halt; pull GPIO3 low to boot again", run: shutdown },
@@ -41,7 +41,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "fault", args: "", description: "read unmapped memory to test exceptions", run: fault },
 ];
 
-fn uptime<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+fn uptime<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     if !args.is_empty() {
         return Outcome::Usage;
     }
@@ -49,7 +49,7 @@ fn uptime<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome
     Outcome::Done
 }
 
-fn random<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+fn random<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     let value = sys::random::u64();
     match args {
         "" => reply.line(LineKind::Rsp, format_args!("{value}")),
@@ -62,7 +62,7 @@ fn random<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome
     Outcome::Done
 }
 
-fn version<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+fn version<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     if !args.is_empty() {
         return Outcome::Usage;
     }
@@ -70,7 +70,7 @@ fn version<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcom
     Outcome::Done
 }
 
-fn info<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+fn info<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     if !args.is_empty() {
         return Outcome::Usage;
     }
@@ -100,12 +100,12 @@ fn info<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome<'
     Outcome::Done
 }
 
-fn echo<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+fn echo<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     reply.rsp(args);
     Outcome::Done
 }
 
-fn reboot<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+fn reboot<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     if !args.is_empty() {
         return Outcome::Usage;
     }
@@ -113,7 +113,7 @@ fn reboot<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome
     Outcome::Then(Action::Reboot)
 }
 
-fn shutdown<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+fn shutdown<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     if !args.is_empty() {
         return Outcome::Usage;
     }
@@ -121,12 +121,12 @@ fn shutdown<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outco
     Outcome::Then(Action::Shutdown)
 }
 
-fn panic<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+fn panic<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     reply.rsp("panicking");
     Outcome::Then(Action::Panic(if args.is_empty() { "panic requested over link" } else { args }))
 }
 
-fn fault<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+fn fault<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     if !args.is_empty() {
         return Outcome::Usage;
     }
