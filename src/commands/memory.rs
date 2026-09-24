@@ -1,5 +1,5 @@
 // memory.rs
-//! The heap.
+//! Memory: the kernel heap, and the page frames programs use.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -8,7 +8,7 @@ use super::{Command, Outcome, Shell};
 use crate::sys;
 
 pub const COMMANDS: &[Command] = &[
-    Command { name: "heap", args: "[test]", description: "heap usage, or an allocator stress test", run: heap },
+    Command { name: "heap", args: "[test]", description: "heap and page usage, or a heap stress test", run: heap },
 ];
 
 fn heap<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
@@ -27,6 +27,12 @@ fn usage(reply: &mut Reply) {
         stats.used / 1024,
         stats.total / 1024,
         stats.largest_free / 1024,
+    ));
+    let pages = sys::memory::stats();
+    reply.line(LineKind::Rsp, format_args!(
+        "pages {} KB used by programs, of {} MB",
+        (pages.total - pages.free) * 4,
+        pages.total * 4 / 1024,
     ));
 }
 

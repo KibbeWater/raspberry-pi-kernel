@@ -11,6 +11,7 @@ pub mod console;
 pub mod elf;
 pub mod fat;
 pub mod font;
+pub mod frames;
 pub mod graphics;
 pub mod heap;
 pub mod link;

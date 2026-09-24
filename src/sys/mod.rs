@@ -5,6 +5,7 @@
 
 pub mod console;
 pub mod fs;
+pub mod memory;
 pub mod print;
 mod heap;
 mod panic;

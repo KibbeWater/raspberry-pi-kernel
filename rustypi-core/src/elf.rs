@@ -201,6 +201,7 @@ pub enum LoadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paging::testing::TestFrames;
     use crate::paging::Table;
     use alloc::boxed::Box;
     use alloc::vec;
@@ -279,7 +280,7 @@ mod tests {
         let file = typical();
         let program = parse(&file).unwrap();
         let kernel = Box::new(Table([0; 512]));
-        let mut space = AddressSpace::new(&kernel);
+        let mut space = AddressSpace::new(&kernel, TestFrames::unlimited()).unwrap();
         program.load(&mut space).unwrap();
 
         assert_eq!(space.pages(), 3); // one code page, two data pages

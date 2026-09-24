@@ -24,14 +24,14 @@ use core::time::Duration;
 use rustypi_abi::{encode_result, Errno, Registers, Syscall, MAX_WRITE, SVC_SYSCALL};
 use rustypi_abi::layout::{MAX_ARGS, STACK_SIZE, STACK_TOP, USER_BASE};
 use rustypi_core::elf;
-use rustypi_core::paging::{Access, AddressSpace, PAGE_SIZE};
+use rustypi_core::paging::{Access, AddressSpace, MapError, PAGE_SIZE};
 use rustypi_core::sched::TaskId;
 use crate::arch::exception::{self, ExceptionContext, CLASS_SVC};
 use crate::arch::{self, mmu};
 use crate::drivers::timer;
 use crate::sched::{self, UserStart};
 use crate::synchronization::{interface::Mutex, IrqLock};
-use crate::{print, println};
+use crate::{print, println, sys};
 
 /// Where built-in program code goes.
 const CODE_BASE: u64 = USER_BASE;
@@ -86,6 +86,8 @@ pub enum SpawnError {
     TooManyPrograms,
     /// The arguments are longer than `MAX_ARGS`.
     ArgsTooLong,
+    /// No page frames left for its memory.
+    OutOfMemory,
 }
 
 impl fmt::Display for SpawnError {
@@ -93,6 +95,7 @@ impl fmt::Display for SpawnError {
         match self {
             SpawnError::TooManyPrograms => write!(f, "too many programs running (at most {})", Asid::COUNT - 1),
             SpawnError::ArgsTooLong => write!(f, "arguments longer than {} bytes", MAX_ARGS),
+            SpawnError::OutOfMemory => write!(f, "out of memory"),
         }
     }
 }
@@ -171,19 +174,23 @@ pub fn spawn(name: &str, code: Code, args: &str) -> Result<Process, SpawnError> 
         return Err(SpawnError::ArgsTooLong);
     }
     let asid = Asid::allocate().ok_or(SpawnError::TooManyPrograms)?;
-    let mut memory = AddressSpace::new(mmu::kernel_table());
+    let mut memory =
+        AddressSpace::new(mmu::kernel_table(), &sys::memory::PAGE_FRAMES).map_err(|_| SpawnError::OutOfMemory)?;
 
     // Nothing else is mapped yet, and ELF segments are checked to fit below the stack, so
-    // none of the mapping can collide.
+    // mapping can only fail for want of memory.
     let (entry, code_ranges) = match code {
         Code::Builtin(program) => {
             let code = programs::image();
-            memory.map_range(CODE_BASE, code.len() as u64, Access::ReadExecute).expect("code fits");
+            memory.map_range(CODE_BASE, code.len() as u64, Access::ReadExecute).map_err(out_of_memory)?;
             memory.load(CODE_BASE, code).expect("code pages are mapped");
             (CODE_BASE + program.offset() as u64, alloc::vec![(CODE_BASE, code.len() as u64)])
         }
         Code::Elf(program) => {
-            program.load(&mut memory).expect("validated segments fit an empty address space");
+            program.load(&mut memory).map_err(|error| match error {
+                elf::LoadError::Map(error) => out_of_memory(error),
+                elf::LoadError::Access(fault) => unreachable!("loading a mapped segment faulted: {:?}", fault),
+            })?;
             let code = program.segments.iter().filter(|segment| segment.access == Access::ReadExecute);
             (program.entry, code.map(|segment| (segment.address, segment.size)).collect())
         }
@@ -196,7 +203,7 @@ pub fn spawn(name: &str, code: Code, args: &str) -> Result<Process, SpawnError> 
     }
 
     // The arguments go at the top of the stack, which starts just below them.
-    memory.map_range(STACK_TOP - STACK_SIZE, STACK_SIZE, Access::ReadWrite).expect("stack fits");
+    memory.map_range(STACK_TOP - STACK_SIZE, STACK_SIZE, Access::ReadWrite).map_err(out_of_memory)?;
     let args_at = (STACK_TOP - args.len() as u64) & !15;
     memory.load(args_at, args.as_bytes()).expect("stack pages are mapped");
 
@@ -253,6 +260,14 @@ extern "C" fn exit_killed() -> ! {
 
 fn was_killed(id: TaskId) -> bool {
     PROCESSES.lock(|processes| processes.get(&id).is_some_and(|running| running.killed))
+}
+
+/// Mapping into a fresh address space: only running out of memory can go wrong.
+fn out_of_memory(error: MapError) -> SpawnError {
+    match error {
+        MapError::OutOfMemory => SpawnError::OutOfMemory,
+        error => unreachable!("mapping a new program: {:?}", error),
+    }
 }
 
 /// Handles a synchronous exception from EL0: a system call, or a fault that kills the program.

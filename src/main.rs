@@ -45,6 +45,10 @@ pub extern "C" fn kernel_main() -> ! {
         println!("no screen: {}", error);
     }
     println!("Hello from RPi! {} {} at EL{}", NAME, sys::VERSION, sys::exception_level());
+    match sys::memory::init() {
+        Ok(bytes) => println!("memory: {} MB of pages for programs", bytes >> 20),
+        Err(error) => println!("memory: no pages for programs: {}", error),
+    }
     match sys::fs::mount() {
         Ok(info) => println!("sd: {:?} volume '{}' mounted", info.fat_type, info.label),
         Err(error) => println!("sd: {}", error),

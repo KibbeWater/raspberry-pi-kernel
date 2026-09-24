@@ -11,11 +11,10 @@
 //! way to ask for both. They are not global, so the TLB tags them with the program's ASID
 //! and a task switch doesn't need to flush it.
 //!
-//! Tables hold physical addresses. The kernel identity-maps RAM, so a physical address is
-//! also a pointer the kernel can follow; host tests use heap pointers the same way.
+//! Tables and pages are page frames from a `FrameSource`, and hold physical addresses. The
+//! kernel identity-maps RAM, so a physical address is also a pointer the kernel can follow;
+//! host tests use heap pointers the same way.
 
-use alloc::alloc::{alloc_zeroed, handle_alloc_error, Layout};
-use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 
 pub use rustypi_abi::layout::{USER_BASE, USER_END};
@@ -29,28 +28,36 @@ const PAGE: u64 = PAGE_SIZE as u64;
 #[repr(C, align(4096))]
 pub struct Table(pub [u64; ENTRIES]);
 
-#[repr(C, align(4096))]
-struct Frame([u8; PAGE_SIZE]);
+/// Where address spaces get page frames (for their pages and tables), and give them back.
+pub trait FrameSource: Sync {
+    /// The physical address of a free frame, or `None` if memory ran out. Its contents are
+    /// unspecified.
+    fn allocate(&self) -> Option<u64>;
 
-/// Types for which all-zero bytes are a valid value.
-unsafe trait Zeroable {}
-unsafe impl Zeroable for Table {}
-unsafe impl Zeroable for Frame {}
-
-/// A zero-filled heap allocation, without building the value on the stack first.
-fn zeroed<T: Zeroable>() -> Box<T> {
-    let layout = Layout::new::<T>();
-    unsafe {
-        let ptr = alloc_zeroed(layout);
-        if ptr.is_null() {
-            handle_alloc_error(layout);
-        }
-        Box::from_raw(ptr.cast())
-    }
+    /// Gives back a frame from `allocate`.
+    ///
+    /// # Safety
+    /// Nothing may use the frame any more.
+    unsafe fn free(&self, frame: u64);
 }
 
-fn physical<T>(value: &T) -> u64 {
-    value as *const T as u64
+/// There is no frame left for a page or table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutOfMemory;
+
+/// A zeroed frame from `source`.
+fn zeroed_frame(source: &dyn FrameSource) -> Result<u64, OutOfMemory> {
+    let frame = source.allocate().ok_or(OutOfMemory)?;
+    unsafe { core::ptr::write_bytes(frame as *mut u8, 0, PAGE_SIZE) };
+    Ok(frame)
+}
+
+/// The table in the frame at `physical`.
+///
+/// # Safety
+/// It must be one of this address space's tables, and not otherwise borrowed.
+unsafe fn table<'a>(physical: u64) -> &'a mut Table {
+    unsafe { &mut *(physical as *mut Table) }
 }
 
 // Descriptor bits (VMSAv8-64, 4KB granule).
@@ -114,6 +121,14 @@ pub enum MapError {
     OutsideWindow,
     /// Something is mapped there already.
     AlreadyMapped,
+    /// There is no frame left for the page or a table.
+    OutOfMemory,
+}
+
+impl From<OutOfMemory> for MapError {
+    fn from(_: OutOfMemory) -> Self {
+        MapError::OutOfMemory
+    }
 }
 
 /// A program may not access `address` that way: it is unmapped, or not writable.
@@ -125,12 +140,14 @@ pub struct AccessFault {
 /// A program's memory: its page tables and the frames they map. Dropping it frees them all,
 /// so the kernel must stop using it first (switch TTBR0 away and flush the TLB).
 pub struct AddressSpace {
-    root: Box<Table>,
-    level2: Box<Table>,
+    source: &'static dyn FrameSource,
+    /// Physical addresses of its tables.
+    root: u64,
+    level2: u64,
     /// By level 2 index.
-    level3: BTreeMap<usize, Box<Table>>,
-    /// By virtual address.
-    frames: BTreeMap<u64, Box<Frame>>,
+    level3: BTreeMap<usize, u64>,
+    /// Physical addresses of its pages, by virtual address.
+    frames: BTreeMap<u64, u64>,
 }
 
 fn level1_index(va: u64) -> usize {
@@ -147,18 +164,22 @@ fn level3_index(va: u64) -> usize {
 
 impl AddressSpace {
     /// An address space with the kernel's entries from `kernel`, its level 1 table, and
-    /// nothing mapped in the user window.
-    pub fn new(kernel: &Table) -> Self {
-        let mut root = zeroed::<Table>();
-        root.0 = kernel.0;
-        let level2 = zeroed::<Table>();
-        root.0[level1_index(USER_BASE)] = physical(&*level2) | VALID | TABLE_OR_PAGE;
-        AddressSpace { root, level2, level3: BTreeMap::new(), frames: BTreeMap::new() }
+    /// nothing mapped in the user window. Its frames come from `source`.
+    pub fn new(kernel: &Table, source: &'static dyn FrameSource) -> Result<Self, OutOfMemory> {
+        let root = zeroed_frame(source)?;
+        let Ok(level2) = zeroed_frame(source) else {
+            unsafe { source.free(root) };
+            return Err(OutOfMemory);
+        };
+        let root_table = unsafe { table(root) };
+        root_table.0 = kernel.0;
+        root_table.0[level1_index(USER_BASE)] = level2 | VALID | TABLE_OR_PAGE;
+        Ok(AddressSpace { source, root, level2, level3: BTreeMap::new(), frames: BTreeMap::new() })
     }
 
     /// The TTBR0 value that makes this the current address space, tagged with `asid`.
     pub fn translation_base(&self, asid: u8) -> u64 {
-        physical(&*self.root) | (asid as u64) << 48
+        self.root | (asid as u64) << 48
     }
 
     /// Maps a zeroed page at `va`.
@@ -172,14 +193,17 @@ impl AddressSpace {
         if self.frames.contains_key(&va) {
             return Err(MapError::AlreadyMapped);
         }
-        let level2 = &mut self.level2;
-        let level3 = self.level3.entry(level2_index(va)).or_insert_with(|| {
-            let table = zeroed::<Table>();
-            level2.0[level2_index(va)] = physical(&*table) | VALID | TABLE_OR_PAGE;
-            table
-        });
-        let frame = zeroed::<Frame>();
-        level3.0[level3_index(va)] = physical(&*frame) | access.descriptor_bits();
+        let level3 = match self.level3.get(&level2_index(va)) {
+            Some(&level3) => level3,
+            None => {
+                let level3 = zeroed_frame(self.source)?;
+                unsafe { table(self.level2) }.0[level2_index(va)] = level3 | VALID | TABLE_OR_PAGE;
+                self.level3.insert(level2_index(va), level3);
+                level3
+            }
+        };
+        let frame = zeroed_frame(self.source)?;
+        unsafe { table(level3) }.0[level3_index(va)] = frame | access.descriptor_bits();
         self.frames.insert(va, frame);
         Ok(())
     }
@@ -199,7 +223,7 @@ impl AddressSpace {
         if !(USER_BASE..USER_END).contains(&va) {
             return None;
         }
-        let level2 = next(self.root.0[level1_index(va)])?;
+        let level2 = next(unsafe { table(self.root) }.0[level1_index(va)])?;
         let level3 = next(level2.0[level2_index(va)])?;
         let descriptor = level3.0[level3_index(va)];
         (descriptor & VALID != 0).then_some(descriptor)
@@ -262,9 +286,73 @@ impl AddressSpace {
     }
 }
 
+impl Drop for AddressSpace {
+    fn drop(&mut self) {
+        let tables = [self.root, self.level2].into_iter().chain(self.level3.values().copied());
+        for frame in self.frames.values().copied().chain(tables) {
+            unsafe { self.source.free(frame) };
+        }
+    }
+}
+
+/// Frames for host tests, from the heap.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::{FrameSource, PAGE_SIZE};
+    use alloc::alloc::{alloc, dealloc, Layout};
+    use alloc::boxed::Box;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Hands out at most `limit` frames at a time, filled with junk so tests notice missing
+    /// zeroing, and counts how many are out so they notice leaks.
+    pub struct TestFrames {
+        live: AtomicUsize,
+        limit: usize,
+    }
+
+    const LAYOUT: Layout = match Layout::from_size_align(PAGE_SIZE, PAGE_SIZE) {
+        Ok(layout) => layout,
+        Err(_) => panic!(),
+    };
+
+    impl TestFrames {
+        pub fn new(limit: usize) -> &'static TestFrames {
+            Box::leak(Box::new(TestFrames { live: AtomicUsize::new(0), limit }))
+        }
+
+        pub fn unlimited() -> &'static TestFrames {
+            TestFrames::new(usize::MAX)
+        }
+
+        pub fn live(&self) -> usize {
+            self.live.load(Ordering::Relaxed)
+        }
+    }
+
+    impl FrameSource for TestFrames {
+        fn allocate(&self) -> Option<u64> {
+            if self.live() >= self.limit {
+                return None;
+            }
+            self.live.fetch_add(1, Ordering::Relaxed);
+            let frame = unsafe { alloc(LAYOUT) };
+            assert!(!frame.is_null());
+            unsafe { core::ptr::write_bytes(frame, 0xAA, PAGE_SIZE) };
+            Some(frame as u64)
+        }
+
+        unsafe fn free(&self, frame: u64) {
+            self.live.fetch_sub(1, Ordering::Relaxed);
+            unsafe { dealloc(frame as *mut u8, LAYOUT) };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::testing::TestFrames;
     use super::*;
+    use alloc::boxed::Box;
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -272,22 +360,26 @@ mod tests {
     const KERNEL_DEVICES: u64 = 0x4000_0000 | VALID;
 
     fn kernel() -> Box<Table> {
-        let mut kernel = zeroed::<Table>();
+        let mut kernel = Box::new(Table([0; ENTRIES]));
         kernel.0[0] = KERNEL_RAM;
         kernel.0[1] = KERNEL_DEVICES;
         kernel
     }
 
     fn space() -> AddressSpace {
-        AddressSpace::new(&kernel())
+        AddressSpace::new(&kernel(), TestFrames::unlimited()).unwrap()
+    }
+
+    fn root(space: &AddressSpace) -> &Table {
+        unsafe { table(space.root) }
     }
 
     #[test]
     fn new_spaces_share_the_kernel_entries_and_map_nothing() {
         let space = space();
-        assert_eq!(space.root.0[0], KERNEL_RAM);
-        assert_eq!(space.root.0[1], KERNEL_DEVICES);
-        assert_eq!(space.root.0[2] & (VALID | TABLE_OR_PAGE), VALID | TABLE_OR_PAGE);
+        assert_eq!(root(&space).0[0], KERNEL_RAM);
+        assert_eq!(root(&space).0[1], KERNEL_DEVICES);
+        assert_eq!(root(&space).0[2] & (VALID | TABLE_OR_PAGE), VALID | TABLE_OR_PAGE);
         assert_eq!(space.translate(USER_BASE), None);
         assert_eq!(space.pages(), 0);
     }
@@ -408,6 +500,42 @@ mod tests {
         let space = space();
         let base = space.translation_base(0xAB);
         assert_eq!(base >> 48, 0xAB);
-        assert_eq!(base & ADDRESS, physical(&*space.root));
+        assert_eq!(base & ADDRESS, space.root);
+    }
+
+    #[test]
+    fn new_pages_are_zeroed() {
+        let mut space = space();
+        space.map(USER_BASE, Access::ReadWrite).unwrap();
+        let mut buf = [0xFF; PAGE_SIZE];
+        space.read_user(USER_BASE, &mut buf).unwrap();
+        assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn dropping_a_space_gives_back_every_frame() {
+        let frames = TestFrames::unlimited();
+        let mut space = AddressSpace::new(&kernel(), frames).unwrap();
+        space.map_range(USER_BASE, 3 * PAGE, Access::ReadExecute).unwrap();
+        space.map(USER_END - PAGE, Access::ReadWrite).unwrap();
+        // 4 pages, the root, level 2, and two level 3 tables.
+        assert_eq!(frames.live(), 8);
+        drop(space);
+        assert_eq!(frames.live(), 0);
+    }
+
+    #[test]
+    fn running_out_of_frames_is_an_error_and_leaks_nothing() {
+        let frames = TestFrames::new(1);
+        assert!(AddressSpace::new(&kernel(), frames).is_err());
+        assert_eq!(frames.live(), 0);
+
+        // The root, level 2, a level 3 table and two pages.
+        let frames = TestFrames::new(5);
+        let mut space = AddressSpace::new(&kernel(), frames).unwrap();
+        assert_eq!(space.map_range(USER_BASE, 3 * PAGE, Access::ReadWrite), Err(MapError::OutOfMemory));
+        assert_eq!(space.pages(), 2);
+        drop(space);
+        assert_eq!(frames.live(), 0);
     }
 }
