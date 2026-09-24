@@ -1,5 +1,8 @@
 //! Starting other programs, waiting for them, and pipes between them.
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use rustypi_abi::{Errno, Syscall, INPUT, OUTPUT};
 use crate::{io, syscall, Handle};
 
@@ -73,6 +76,11 @@ impl PipeReader {
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
         io::read_handle(self.0 .0, buf)
     }
+
+    /// Reads until every writer has gone, onto the end of `bytes`.
+    pub fn read_to_end(&mut self, bytes: &mut Vec<u8>) -> Result<usize, Errno> {
+        io::read_to_end_from(self.0 .0, bytes)
+    }
 }
 
 impl PipeWriter {
@@ -81,11 +89,7 @@ impl PipeWriter {
         io::write_handle(self.0 .0, bytes)
     }
 
-    pub fn write_all(&mut self, mut bytes: &[u8]) -> Result<(), Errno> {
-        while !bytes.is_empty() {
-            let written = self.write(bytes)?;
-            bytes = &bytes[written..];
-        }
-        Ok(())
+    pub fn write_all(&mut self, bytes: &[u8]) -> Result<(), Errno> {
+        io::write_all_to(self.0 .0, bytes)
     }
 }

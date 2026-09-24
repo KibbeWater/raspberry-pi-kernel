@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::{self, Write};
-use rustypi_abi::{Errno, Syscall, INPUT, MAX_WRITE, OUTPUT};
+use rustypi_abi::{Errno, Syscall, INPUT, MAX_READ, MAX_WRITE, OUTPUT};
 use crate::syscall;
 
 /// Reads input into `buf`, waiting until there is some. Returns how many bytes were read: 0
@@ -40,16 +40,7 @@ pub fn read_line() -> Result<Option<String>, Errno> {
 
 /// Reads all of the input, until it is over.
 pub fn read_to_end(bytes: &mut Vec<u8>) -> Result<usize, Errno> {
-    let mut chunk = [0; rustypi_abi::MAX_READ];
-    let mut total = 0;
-    loop {
-        let read = read(&mut chunk)?;
-        if read == 0 {
-            return Ok(total);
-        }
-        bytes.extend_from_slice(&chunk[..read]);
-        total += read;
-    }
+    read_to_end_from(INPUT, bytes)
 }
 
 /// Writes bytes to the output (the console, or a pipe), returning how many went.
@@ -67,13 +58,32 @@ pub(crate) fn read_handle(handle: u64, buf: &mut [u8]) -> Result<usize, Errno> {
     syscall::call(call).map(|read| read as usize)
 }
 
-/// Writes all of `bytes` to the output.
-pub fn write_all(mut bytes: &[u8]) -> Result<(), Errno> {
+/// Reads from `handle` onto the end of `bytes` until it is over, returning how many came.
+pub(crate) fn read_to_end_from(handle: u64, bytes: &mut Vec<u8>) -> Result<usize, Errno> {
+    let mut chunk = [0; MAX_READ];
+    let mut total = 0;
+    loop {
+        let read = read_handle(handle, &mut chunk)?;
+        if read == 0 {
+            return Ok(total);
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        total += read;
+    }
+}
+
+/// Writes all of `bytes` to `handle`.
+pub(crate) fn write_all_to(handle: u64, mut bytes: &[u8]) -> Result<(), Errno> {
     while !bytes.is_empty() {
-        let written = write(bytes)?;
+        let written = write_handle(handle, bytes)?;
         bytes = &bytes[written..];
     }
     Ok(())
+}
+
+/// Writes all of `bytes` to the output.
+pub fn write_all(bytes: &[u8]) -> Result<(), Errno> {
+    write_all_to(OUTPUT, bytes)
 }
 
 /// Collects formatted output, so a `println!` is usually a single system call.

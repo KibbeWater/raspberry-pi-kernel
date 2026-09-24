@@ -6,8 +6,8 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use rustypi_abi::{Errno, Syscall, MAX_READ};
-use crate::{syscall, Handle};
+use rustypi_abi::{Errno, Syscall};
+use crate::{io, syscall, Handle};
 
 pub use rustypi_abi::DirEntry;
 
@@ -22,22 +22,12 @@ impl File {
 
     /// Reads into `buf`, returning how many bytes were read: 0 at the end of the file.
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
-        let call = Syscall::Read { handle: self.0 .0, ptr: buf.as_mut_ptr() as u64, len: buf.len() as u64 };
-        syscall::call(call).map(|read| read as usize)
+        io::read_handle(self.0 .0, buf)
     }
 
     /// Reads the rest of the file onto the end of `bytes`.
     pub fn read_to_end(&mut self, bytes: &mut Vec<u8>) -> Result<usize, Errno> {
-        let mut total = 0;
-        let mut chunk = [0; MAX_READ];
-        loop {
-            let read = self.read(&mut chunk)?;
-            if read == 0 {
-                return Ok(total);
-            }
-            bytes.extend_from_slice(&chunk[..read]);
-            total += read;
-        }
+        io::read_to_end_from(self.0 .0, bytes)
     }
 }
 
@@ -67,15 +57,11 @@ impl NewFile {
 
     /// Adds some of `bytes`, returning how many.
     pub fn write(&mut self, bytes: &[u8]) -> Result<usize, Errno> {
-        crate::io::write_handle(self.0 .0, bytes)
+        io::write_handle(self.0 .0, bytes)
     }
 
-    pub fn write_all(&mut self, mut bytes: &[u8]) -> Result<(), Errno> {
-        while !bytes.is_empty() {
-            let written = self.write(bytes)?;
-            bytes = &bytes[written..];
-        }
-        Ok(())
+    pub fn write_all(&mut self, bytes: &[u8]) -> Result<(), Errno> {
+        io::write_all_to(self.0 .0, bytes)
     }
 
     /// Writes the file to the card.
