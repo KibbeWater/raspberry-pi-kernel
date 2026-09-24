@@ -50,6 +50,8 @@ enum Inbound {
     Local(String),
     /// Ctrl+C on the Pi's own keyboard.
     Interrupt,
+    /// Lines from the UDP console, and who sent them, which gets the reply.
+    Remote(String, sys::net::Peer),
 }
 
 /// Frames waiting for the shell task, oldest first.
@@ -92,7 +94,9 @@ pub extern "C" fn kernel_main() -> ! {
             sys::usb::Input::Interrupt => Inbound::Interrupt,
         });
     });
-    sys::net::start();
+    sys::net::start(|text, peer| {
+        deliver(Inbound::Remote(text, peer));
+    });
     shell_task()
 }
 
@@ -170,6 +174,21 @@ fn shell_task() -> ! {
                 }
             }
             Inbound::Interrupt => shell.interrupt(),
+            Inbound::Remote(text, peer) => {
+                for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+                    let mut reply = Reply::new();
+                    let action = shell.handle(line, &mut reply);
+                    let mut answer = String::new();
+                    for line in reply.lines() {
+                        answer.push_str(line);
+                        answer.push('\n');
+                    }
+                    sys::net::reply(peer, &answer);
+                    if let Some(action) = action {
+                        action.perform();
+                    }
+                }
+            }
             Inbound::Local(line) => {
                 let mut reply = Reply::new();
                 let action = shell.handle(&line, &mut reply);

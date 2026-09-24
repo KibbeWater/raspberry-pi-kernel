@@ -2,13 +2,18 @@
 //! Networking over the Pi 3 B+'s Ethernet: a task started at boot waits for USB to find the
 //! LAN7800, brings it up with the board's MAC address, and runs a
 //! `rustypi_core::net::interface::Interface` on it, which gets an address by DHCP and answers
-//! ARP and pings. `ping` sends pings of our own.
+//! ARP and pings. `ping` sends pings of our own. Datagrams to UDP port 2323 are a console:
+//! each line is a shell command, and `reply` sends the answer back.
 
 use alloc::collections::VecDeque;
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use rustypi_core::net::interface::{Config, Event, Interface};
 use rustypi_core::net::{Ipv4, Mac};
+use rustypi_core::sched::TaskId;
 use crate::drivers::lan7800::{self, Lan7800, Link};
 use crate::drivers::mailbox::tags::GetMacAddress;
 use crate::drivers::mailbox::{query, Mailbox};
@@ -23,6 +28,18 @@ const LINK_CHECK: Duration = Duration::from_secs(1);
 const IDLE_POLL: Duration = Duration::from_millis(10);
 /// How long to wait for USB to find the LAN7800 before giving up.
 const USB_WAIT: Duration = Duration::from_secs(20);
+
+/// The UDP port of the console.
+pub const CONSOLE_PORT: u16 = 2323;
+/// Most bytes of console reply in one datagram: well inside a frame.
+const MAX_REPLY_DATAGRAM: usize = 1400;
+
+/// Who sent a console line, and so where its answer goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Peer {
+    pub address: Ipv4,
+    pub port: u16,
+}
 
 /// Where networking is, for `net`.
 #[derive(Clone, Copy)]
@@ -47,17 +64,49 @@ static STATUS: IrqLock<Status> = IrqLock::new(Status { state: State::Starting, m
 /// Pings `ping` asked for, and the answers the task got.
 static PING_REQUESTS: IrqLock<VecDeque<(Ipv4, u16)>> = IrqLock::new(VecDeque::new());
 static PING_REPLIES: IrqLock<VecDeque<(Ipv4, u16, u64)>> = IrqLock::new(VecDeque::new());
+/// Console replies waiting to go out.
+static CONSOLE_OUT: IrqLock<VecDeque<(Peer, Vec<u8>)>> = IrqLock::new(VecDeque::new());
+/// The network task, plus one (0 until it starts), to wake when there is something to send.
+static TASK: AtomicUsize = AtomicUsize::new(0);
+
+/// Cuts the network task's sleep short, for something to send now.
+fn wake() {
+    if let Some(id) = TASK.load(Ordering::Relaxed).checked_sub(1) {
+        sched::interrupt(TaskId(id));
+    }
+}
 
 pub fn status() -> Status {
     STATUS.lock(|status| *status)
 }
 
-/// Starts networking in the background.
-pub fn start() {
-    sched::spawn("net", run);
+/// Starts networking in the background. Console lines, and who sent them, go to
+/// `on_console`.
+pub fn start(on_console: fn(String, Peer)) {
+    let id = sched::spawn("net", move || run(on_console));
+    TASK.store(id.0 + 1, Ordering::Relaxed);
 }
 
-fn run() {
+/// Sends `text`, a console answer, to `peer`, in as many datagrams as it takes (split
+/// between lines where it can).
+pub fn reply(peer: Peer, text: &str) {
+    let mut rest = text.as_bytes();
+    CONSOLE_OUT.lock(|out| {
+        while !rest.is_empty() {
+            let mut end = rest.len().min(MAX_REPLY_DATAGRAM);
+            if end < rest.len() {
+                if let Some(newline) = rest[..end].iter().rposition(|&b| b == b'\n') {
+                    end = newline + 1;
+                }
+            }
+            out.push_back((peer, rest[..end].to_vec()));
+            rest = &rest[end..];
+        }
+    });
+    wake();
+}
+
+fn run(on_console: fn(String, Peer)) {
     let Some(mut lan) = bring_up() else { return };
     let mut interface = Interface::new(lan.mac, super::random::u64() as u32);
     STATUS.lock(|status| {
@@ -84,9 +133,12 @@ fn run() {
             }
         }
 
-        let mut out = alloc::vec::Vec::new();
+        let mut out = Vec::new();
         while let Some((target, seq)) = PING_REQUESTS.lock(|requests| requests.pop_front()) {
             out.extend(interface.ping(target, seq, now));
+        }
+        while let Some((peer, data)) = CONSOLE_OUT.lock(|replies| replies.pop_front()) {
+            out.extend(interface.send_udp(peer.address, peer.port, CONSOLE_PORT, &data, now));
         }
         let frames = match usb::with_bus(|host, _| lan.receive(host)) {
             Some(Ok(frames)) => {
@@ -98,7 +150,7 @@ fn run() {
                     println!("net: receiving: {error}");
                     failing = true;
                 }
-                alloc::vec::Vec::new()
+                Vec::new()
             }
             None => return,
         };
@@ -130,10 +182,16 @@ fn run() {
                         replies.pop_front();
                     }
                 }),
+                Event::Udp { from, from_port, port: CONSOLE_PORT, data } => {
+                    let text = String::from_utf8_lossy(&data).into_owned();
+                    on_console(text, Peer { address: from, port: from_port });
+                }
+                Event::Udp { .. } => {}
             }
         }
-        // Straight on while frames keep coming; otherwise a tick's rest.
-        if frames.is_empty() {
+        // Straight on while frames keep coming or an answer is due (so round trips are
+        // measured, not rounded up to ticks); otherwise a tick's rest, unless woken.
+        if frames.is_empty() && !interface.awaiting() {
             sched::sleep(IDLE_POLL);
         } else {
             sched::yield_now();
@@ -215,6 +273,7 @@ pub fn ping(target: Ipv4, seq: u16, timeout: Duration) -> Result<u64, PingError>
     }
     PING_REPLIES.lock(|replies| replies.retain(|&(_, pending, _)| pending != seq));
     PING_REQUESTS.lock(|requests| requests.push_back((target, seq)));
+    wake();
     let started = timer::now_us();
     loop {
         let answer = PING_REPLIES.lock(|replies| {
