@@ -455,6 +455,7 @@ pub struct KeyboardReport {
 
 /// Modifier bits: left control, shift, alt, GUI, then the right ones.
 const SHIFT: u8 = 1 << 1 | 1 << 5;
+const RIGHT_ALT: u8 = 1 << 6;
 /// A key usage meaning "too many keys held to tell".
 const ROLLOVER: u8 = 1;
 
@@ -470,8 +471,9 @@ impl KeyboardReport {
         Ok(KeyboardReport { modifiers: bytes[0], keys })
     }
 
-    pub fn shift(&self) -> bool {
-        self.modifiers & SHIFT != 0
+    /// The modifiers held, as a layout needs them.
+    pub fn held(&self) -> Modifiers {
+        Modifiers { shift: self.modifiers & SHIFT != 0, alt_gr: self.modifiers & RIGHT_ALT != 0 }
     }
 
     /// Keys held now that weren't in `previous`, the report before: the ones just pressed.
@@ -481,33 +483,139 @@ impl KeyboardReport {
     }
 }
 
-/// The character a key gives on a US layout, with shift held or not, if it gives one.
-pub fn key_to_char(usage: u8, shift: bool) -> Option<char> {
-    const LETTERS: core::ops::RangeInclusive<u8> = 0x04..=0x1D;
-    const DIGITS: &[u8; 10] = b"1234567890";
-    const SHIFTED_DIGITS: &[u8; 10] = b"!@#$%^&*()";
-    // Usages 0x2C to 0x38: space and punctuation.
-    const PUNCTUATION: &[u8; 13] = b" -=[]\\#;'`,./";
-    const SHIFTED_PUNCTUATION: &[u8; 13] = b" _+{}|~:\"~<>?";
-    let byte = match usage {
-        usage if LETTERS.contains(&usage) => {
-            let letter = b'a' + (usage - 0x04);
-            if shift { letter.to_ascii_uppercase() } else { letter }
+/// A keyboard layout: which character each key gives. Keyboards only report keys, by
+/// position, so the layout has to be chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    Us,
+    /// Swedish (and Finnish, which is the same), ISO.
+    Swedish,
+}
+
+impl Layout {
+    pub const ALL: [Layout; 2] = [Layout::Us, Layout::Swedish];
+
+    /// Its short name, as `from_name` takes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Layout::Us => "us",
+            Layout::Swedish => "sv",
         }
+    }
+
+    pub fn from_name(name: &str) -> Option<Layout> {
+        match name {
+            "us" => Some(Layout::Us),
+            "sv" | "se" | "fi" => Some(Layout::Swedish),
+            _ => None,
+        }
+    }
+
+    /// The character the key with HID usage `usage` gives with `modifiers` held, if it gives
+    /// one. Accents (Swedish ´ ` ¨ ^ ~) are typed as themselves, not combined with the next
+    /// letter.
+    pub fn char(self, usage: u8, modifiers: Modifiers) -> Option<char> {
+        // Keys every layout here shares.
+        match usage {
+            0x28 => return Some('\n'),
+            0x2A => return Some('\x08'), // backspace
+            0x2B => return Some('\t'),
+            0x2C => return Some(' '),
+            _ => {}
+        }
+        match self {
+            Layout::Us => us(usage, modifiers.shift),
+            Layout::Swedish if modifiers.alt_gr => swedish_alt_gr(usage),
+            Layout::Swedish => swedish(usage, modifiers.shift),
+        }
+    }
+}
+
+/// The modifier keys a layout cares about.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    pub shift: bool,
+    /// Right Alt, which some layouts use for a third character on a key.
+    pub alt_gr: bool,
+}
+
+/// A letter key (usages 0x04 to 0x1D, a to z on both layouts).
+fn letter(usage: u8, shift: bool) -> Option<char> {
+    let letter = (b'a' + usage.checked_sub(0x04).filter(|&i| i < 26)?) as char;
+    Some(if shift { letter.to_ascii_uppercase() } else { letter })
+}
+
+/// Picks the plain or shifted character of a key.
+fn pick(shift: bool, plain: char, shifted: char) -> Option<char> {
+    Some(if shift { shifted } else { plain })
+}
+
+fn us(usage: u8, shift: bool) -> Option<char> {
+    const DIGITS: [char; 10] = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
+    const SHIFTED_DIGITS: [char; 10] = ['!', '@', '#', '$', '%', '^', '&', '*', '(', ')'];
+    match usage {
         0x1E..=0x27 => {
             let i = (usage - 0x1E) as usize;
-            if shift { SHIFTED_DIGITS[i] } else { DIGITS[i] }
+            pick(shift, DIGITS[i], SHIFTED_DIGITS[i])
         }
-        0x28 => b'\n',
-        0x2A => 0x08, // backspace
-        0x2B => b'\t',
-        0x2C..=0x38 => {
-            let i = (usage - 0x2C) as usize;
-            if shift { SHIFTED_PUNCTUATION[i] } else { PUNCTUATION[i] }
+        0x2D => pick(shift, '-', '_'),
+        0x2E => pick(shift, '=', '+'),
+        0x2F => pick(shift, '[', '{'),
+        0x30 => pick(shift, ']', '}'),
+        0x31 => pick(shift, '\\', '|'),
+        0x32 => pick(shift, '#', '~'),
+        0x33 => pick(shift, ';', ':'),
+        0x34 => pick(shift, '\'', '"'),
+        0x35 => pick(shift, '`', '~'),
+        0x36 => pick(shift, ',', '<'),
+        0x37 => pick(shift, '.', '>'),
+        0x38 => pick(shift, '/', '?'),
+        0x64 => pick(shift, '\\', '|'),
+        _ => letter(usage, shift),
+    }
+}
+
+fn swedish(usage: u8, shift: bool) -> Option<char> {
+    const DIGITS: [char; 10] = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
+    const SHIFTED_DIGITS: [char; 10] = ['!', '"', '#', '¤', '%', '&', '/', '(', ')', '='];
+    match usage {
+        0x1E..=0x27 => {
+            let i = (usage - 0x1E) as usize;
+            pick(shift, DIGITS[i], SHIFTED_DIGITS[i])
         }
+        0x2D => pick(shift, '+', '?'),
+        0x2E => pick(shift, '´', '`'),
+        0x2F => pick(shift, 'å', 'Å'),
+        0x30 => pick(shift, '¨', '^'),
+        // The key by Enter: 0x32 on ISO keyboards, 0x31 where a keyboard reports the US one.
+        0x31 | 0x32 => pick(shift, '\'', '*'),
+        0x33 => pick(shift, 'ö', 'Ö'),
+        0x34 => pick(shift, 'ä', 'Ä'),
+        0x35 => pick(shift, '§', '½'),
+        0x36 => pick(shift, ',', ';'),
+        0x37 => pick(shift, '.', ':'),
+        0x38 => pick(shift, '-', '_'),
+        // The extra key by left shift.
+        0x64 => pick(shift, '<', '>'),
+        _ => letter(usage, shift),
+    }
+}
+
+fn swedish_alt_gr(usage: u8) -> Option<char> {
+    Some(match usage {
+        0x1F => '@',
+        0x20 => '£',
+        0x21 => '$',
+        0x22 | 0x08 => '€', // 5 and E
+        0x24 => '{',
+        0x25 => '[',
+        0x26 => ']',
+        0x27 => '}',
+        0x2D => '\\',
+        0x30 => '~',
+        0x64 => '|',
         _ => return None,
-    };
-    Some(byte as char)
+    })
 }
 
 #[cfg(test)]
@@ -606,7 +714,7 @@ mod tests {
         let idle = KeyboardReport::parse(&[0; 8]).unwrap();
         // Shift and 'a' held.
         let a = KeyboardReport::parse(&[0x02, 0, 0x04, 0, 0, 0, 0, 0]).unwrap();
-        assert!(a.shift());
+        assert!(a.held().shift);
         assert_eq!(a.pressed_since(&idle).collect::<Vec<_>>(), [0x04]);
         // 'b' joins while 'a' stays held: only 'b' is new.
         let ab = KeyboardReport::parse(&[0, 0, 0x04, 0x05, 0, 0, 0, 0]).unwrap();
@@ -617,18 +725,65 @@ mod tests {
         assert_eq!(KeyboardReport::parse(&[0; 4]), Err(DescriptorError::Truncated));
     }
 
+    const PLAIN: Modifiers = Modifiers { shift: false, alt_gr: false };
+    const SHIFT_HELD: Modifiers = Modifiers { shift: true, alt_gr: false };
+    const ALT_GR: Modifiers = Modifiers { shift: false, alt_gr: true };
+
     #[test]
     fn keys_map_to_us_layout_characters() {
-        assert_eq!(key_to_char(0x04, false), Some('a'));
-        assert_eq!(key_to_char(0x1D, true), Some('Z'));
-        assert_eq!(key_to_char(0x1E, false), Some('1'));
-        assert_eq!(key_to_char(0x1F, true), Some('@'));
-        assert_eq!(key_to_char(0x27, false), Some('0'));
-        assert_eq!(key_to_char(0x28, false), Some('\n'));
-        assert_eq!(key_to_char(0x2C, true), Some(' '));
-        assert_eq!(key_to_char(0x2D, true), Some('_'));
-        assert_eq!(key_to_char(0x38, false), Some('/'));
-        assert_eq!(key_to_char(0x38, true), Some('?'));
-        assert_eq!(key_to_char(0x3A, false), None); // F1
+        let us = |usage, modifiers| Layout::Us.char(usage, modifiers);
+        assert_eq!(us(0x04, PLAIN), Some('a'));
+        assert_eq!(us(0x1D, SHIFT_HELD), Some('Z'));
+        assert_eq!(us(0x1E, PLAIN), Some('1'));
+        assert_eq!(us(0x1F, SHIFT_HELD), Some('@'));
+        assert_eq!(us(0x27, PLAIN), Some('0'));
+        assert_eq!(us(0x28, PLAIN), Some('\n'));
+        assert_eq!(us(0x2C, SHIFT_HELD), Some(' '));
+        assert_eq!(us(0x2D, SHIFT_HELD), Some('_'));
+        assert_eq!(us(0x38, PLAIN), Some('/'));
+        assert_eq!(us(0x38, SHIFT_HELD), Some('?'));
+        // Right Alt means nothing on a US layout.
+        assert_eq!(us(0x1F, ALT_GR), Some('2'));
+        assert_eq!(us(0x3A, PLAIN), None); // F1
+    }
+
+    #[test]
+    fn keys_map_to_swedish_layout_characters() {
+        let sv = |usage, modifiers| Layout::Swedish.char(usage, modifiers);
+        // Letters and the digits stay; the keys around them change.
+        assert_eq!(sv(0x04, PLAIN), Some('a'));
+        assert_eq!(sv(0x1F, PLAIN), Some('2'));
+        assert_eq!(sv(0x1F, SHIFT_HELD), Some('"'));
+        assert_eq!(sv(0x24, SHIFT_HELD), Some('/'));
+        assert_eq!(sv(0x27, SHIFT_HELD), Some('='));
+        assert_eq!([sv(0x2F, PLAIN), sv(0x34, PLAIN), sv(0x33, PLAIN)], [Some('å'), Some('ä'), Some('ö')]);
+        assert_eq!([sv(0x2F, SHIFT_HELD), sv(0x34, SHIFT_HELD), sv(0x33, SHIFT_HELD)], [Some('Å'), Some('Ä'), Some('Ö')]);
+        assert_eq!(sv(0x38, PLAIN), Some('-'));
+        assert_eq!(sv(0x2D, SHIFT_HELD), Some('?'));
+        assert_eq!(sv(0x64, SHIFT_HELD), Some('>'));
+        // AltGr reaches the third characters, and nothing on keys without one.
+        assert_eq!(sv(0x1F, ALT_GR), Some('@'));
+        assert_eq!(sv(0x21, ALT_GR), Some('$'));
+        assert_eq!([sv(0x24, ALT_GR), sv(0x27, ALT_GR)], [Some('{'), Some('}')]);
+        assert_eq!(sv(0x2D, ALT_GR), Some('\\'));
+        assert_eq!(sv(0x64, ALT_GR), Some('|'));
+        assert_eq!(sv(0x04, ALT_GR), None);
+    }
+
+    #[test]
+    fn layouts_are_chosen_by_name() {
+        for layout in Layout::ALL {
+            assert_eq!(Layout::from_name(layout.name()), Some(layout));
+        }
+        assert_eq!(Layout::from_name("se"), Some(Layout::Swedish));
+        assert_eq!(Layout::from_name("dvorak"), None);
+    }
+
+    #[test]
+    fn reports_say_which_modifiers_are_held() {
+        let report = KeyboardReport::parse(&[0x20 | 0x40, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(report.held(), Modifiers { shift: true, alt_gr: true });
+        let left_alt = KeyboardReport::parse(&[0x04, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(left_alt.held(), PLAIN);
     }
 }
