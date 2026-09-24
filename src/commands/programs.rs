@@ -43,7 +43,7 @@ fn run_program<'a>(shell: &mut Shell, args: &'a str, reply: &mut Reply) -> Outco
     if program.is_empty() {
         return Outcome::Usage;
     }
-    match find(program) {
+    match find(shell, program) {
         Some(target) => start(shell, target, args, background, reply),
         None => reply.line(LineKind::Rsp, format_args!("run: no program '{program}' in /bin or built in")),
     }
@@ -64,10 +64,11 @@ pub(super) enum Target {
     Builtin(&'static Program),
 }
 
-/// Finds a program by path (anything with a `/`), else as `/bin/<name>`, else built in.
-pub(super) fn find(program: &str) -> Option<Target> {
+/// Finds a program by path (anything with a `/`, from the current directory), else as
+/// `/bin/<name>`, else built in.
+pub(super) fn find(shell: &Shell, program: &str) -> Option<Target> {
     if program.contains('/') {
-        return Some(Target::File(program.into()));
+        return Some(Target::File(shell.path(program)));
     }
     let path = format!("/bin/{program}");
     if sys::fs::metadata(&path).is_ok_and(|entry| entry.kind == EntryKind::File) {
@@ -89,9 +90,9 @@ pub(super) fn start(shell: &mut Shell, target: Target, args: &str, background: b
                 Err(error) => return reply.line(LineKind::Rsp, format_args!("run: {}: {}", path, error.description())),
             };
             let name = path.rsplit('/').next().unwrap_or(path);
-            (process::spawn(name, Code::Elf(&elf), args), path.as_str())
+            (process::spawn(name, Code::Elf(&elf), args, &shell.cwd), path.as_str())
         }
-        Target::Builtin(builtin) => (process::spawn(builtin.name, Code::Builtin(builtin), args), builtin.name),
+        Target::Builtin(builtin) => (process::spawn(builtin.name, Code::Builtin(builtin), args, &shell.cwd), builtin.name),
     };
     match started {
         Ok(process) if background => {
@@ -130,7 +131,7 @@ fn test(reply: &mut Reply) {
     let started: Vec<_> = PROGRAMS
         .iter()
         .map(|program| {
-            let spawn = |args| process::spawn(program.name, Code::Builtin(program), args);
+            let spawn = |args| process::spawn(program.name, Code::Builtin(program), args, "/");
             (program, INSTANCES.map(spawn))
         })
         .collect();

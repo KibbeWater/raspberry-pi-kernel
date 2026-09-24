@@ -116,6 +116,17 @@ pub fn metadata(path: &str) -> Result<DirEntry, FsError> {
     with_fs(|fs| Ok(fs.fat.metadata(path)?))
 }
 
+/// Checks `path` (absolute) is a directory, the root included.
+pub fn check_dir(path: &str) -> Result<(), FsError> {
+    if path.trim_matches('/').is_empty() {
+        return Ok(());
+    }
+    match metadata(path)?.kind {
+        EntryKind::Directory => Ok(()),
+        EntryKind::File => Err(FsError::Fat(FatError::NotADirectory)),
+    }
+}
+
 /// Whether `path` is something the Pi needs to boot: the firmware, its configuration, the
 /// kernel, device trees, overlays. Writing, replacing and removing leave these alone, so a
 /// bug (or a slip) can't stop the Pi booting.

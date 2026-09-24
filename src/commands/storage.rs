@@ -2,7 +2,7 @@
 //! The SD card and its filesystem.
 
 use alloc::vec::Vec;
-use rustypi_abi::MAX_FILE;
+use rustypi_abi::{MAX_FILE, MAX_PATH};
 use rustypi_core::mbr::Volume;
 use rustypi_core::session::{LineKind, Reply};
 use super::{Command, Outcome, Shell};
@@ -13,6 +13,8 @@ use crate::sys::fs::EntryKind;
 const MAX_LISTING_LINES: usize = 40;
 
 pub const COMMANDS: &[Command] = &[
+    Command { name: "cd", args: "[path]", description: "change the current directory; / without a path", run: cd },
+    Command { name: "pwd", args: "", description: "show the current directory", run: pwd },
     Command { name: "sd", args: "[bench|writetest]", description: "sd card info, a read speed test, or a write test", run: sd },
     Command { name: "ls", args: "[-a] [path]", description: "list a directory; -a shows dotfiles", run: ls },
     Command { name: "cat", args: "<path>", description: "show the start of a text file", run: cat },
@@ -21,13 +23,37 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "mkdir", args: "<path>", description: "make a directory", run: mkdir },
 ];
 
-fn write<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+fn cd<'a>(shell: &mut Shell, path: &'a str, reply: &mut Reply) -> Outcome<'a> {
+    let resolved = shell.path(if path.is_empty() { "/" } else { path });
+    if resolved.len() > MAX_PATH {
+        reply.line(LineKind::Rsp, format_args!("cd: {path}: path too long"));
+        return Outcome::Done;
+    }
+    match sys::fs::check_dir(&resolved) {
+        Ok(()) => {
+            reply.rsp(&resolved);
+            shell.cwd = resolved;
+        }
+        Err(error) => reply.line(LineKind::Rsp, format_args!("cd: {path}: {error}")),
+    }
+    Outcome::Done
+}
+
+fn pwd<'a>(shell: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+    if !args.is_empty() {
+        return Outcome::Usage;
+    }
+    reply.rsp(&shell.cwd);
+    Outcome::Done
+}
+
+fn write<'a>(shell: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     let Some((path, text)) = args.split_once(char::is_whitespace) else {
         return Outcome::Usage;
     };
     let mut line = text.trim_start().as_bytes().to_vec();
     line.push(b'\n');
-    match sys::fs::write_file(path, &line) {
+    match sys::fs::write_file(&shell.path(path), &line) {
         Ok(()) => reply.line(LineKind::Rsp, format_args!("wrote {} bytes to {}", line.len(), path)),
         Err(error) => reply.line(LineKind::Rsp, format_args!("write: {path}: {error}")),
     }
@@ -35,22 +61,22 @@ fn write<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
 }
 
 /// Paths are the whole argument, since FAT names can have spaces in them.
-fn rm<'a>(_: &mut Shell, path: &'a str, reply: &mut Reply) -> Outcome<'a> {
+fn rm<'a>(shell: &mut Shell, path: &'a str, reply: &mut Reply) -> Outcome<'a> {
     if path.is_empty() {
         return Outcome::Usage;
     }
-    match sys::fs::remove(path) {
+    match sys::fs::remove(&shell.path(path)) {
         Ok(()) => reply.line(LineKind::Rsp, format_args!("removed {path}")),
         Err(error) => reply.line(LineKind::Rsp, format_args!("rm: {path}: {error}")),
     }
     Outcome::Done
 }
 
-fn mkdir<'a>(_: &mut Shell, path: &'a str, reply: &mut Reply) -> Outcome<'a> {
+fn mkdir<'a>(shell: &mut Shell, path: &'a str, reply: &mut Reply) -> Outcome<'a> {
     if path.is_empty() {
         return Outcome::Usage;
     }
-    match sys::fs::create_dir(path) {
+    match sys::fs::create_dir(&shell.path(path)) {
         Ok(()) => reply.line(LineKind::Rsp, format_args!("made directory {path}")),
         Err(error) => reply.line(LineKind::Rsp, format_args!("mkdir: {path}: {error}")),
     }
@@ -146,13 +172,13 @@ fn bench(reply: &mut Reply) {
 
 /// Dotfiles (like the `._*` files macOS leaves on FAT volumes) are hidden unless `-a` is
 /// given.
-fn ls<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+fn ls<'a>(shell: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     let (all, path) = match args.strip_prefix("-a") {
         Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => (true, rest.trim()),
         _ => (false, args),
     };
-    let path = if path.is_empty() { "/" } else { path };
-    let entries = match sys::fs::read_dir(path) {
+    let path = if path.is_empty() { "." } else { path };
+    let entries = match sys::fs::read_dir(&shell.path(path)) {
         Ok(entries) => entries,
         Err(error) => {
             reply.line(LineKind::Rsp, format_args!("ls: {path}: {error}"));
@@ -175,11 +201,11 @@ fn ls<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     Outcome::Done
 }
 
-fn cat<'a>(_: &mut Shell, path: &'a str, reply: &mut Reply) -> Outcome<'a> {
+fn cat<'a>(shell: &mut Shell, path: &'a str, reply: &mut Reply) -> Outcome<'a> {
     if path.is_empty() {
         return Outcome::Usage;
     }
-    let data = match sys::fs::read_file(path) {
+    let data = match sys::fs::read_file(&shell.path(path)) {
         Ok(data) => data,
         Err(error) => {
             reply.line(LineKind::Rsp, format_args!("cat: {path}: {error}"));

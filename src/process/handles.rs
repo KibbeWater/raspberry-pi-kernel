@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use core::time::Duration;
 use rustypi_abi::layout::MAX_ARGS;
 use rustypi_abi::{DirEntry, Errno, ExitStatus, INPUT, MAX_HANDLES, MAX_PATH, MAX_READ, MAX_WRITE, OUTPUT};
-use rustypi_core::elf;
+use rustypi_core::{elf, path};
 use rustypi_core::sched::TaskId;
 use rustypi_core::fat::{self, EntryKind, FatError};
 use crate::sched;
@@ -109,13 +109,19 @@ fn user_string(ptr: u64, len: u64, max: usize) -> Result<String, Errno> {
     String::from_utf8(buf).map_err(|_| Errno::Invalid)
 }
 
+/// Copies a path out of program memory, resolved against the program's current directory.
+fn user_path(ptr: u64, len: u64) -> Result<String, Errno> {
+    let path = user_string(ptr, len, MAX_PATH)?;
+    Ok(with_running(|running| path::resolve(&running.cwd, &path)))
+}
+
 pub(super) fn open(path: u64, len: u64) -> Result<u64, Errno> {
-    let data = FileBuffer::adopt(fs::read_file(&user_string(path, len, MAX_PATH)?).map_err(errno)?)?;
+    let data = FileBuffer::adopt(fs::read_file(&user_path(path, len)?).map_err(errno)?)?;
     with_running(|running| running.handles.insert(Open::File { data, position: 0 }))
 }
 
 pub(super) fn open_dir(path: u64, len: u64) -> Result<u64, Errno> {
-    let path = user_string(path, len, MAX_PATH)?;
+    let path = user_path(path, len)?;
     let entries = fs::read_dir(&path).map_err(errno)?;
     with_running(|running| running.handles.insert(Open::Dir { entries, position: 0 }))
 }
@@ -168,17 +174,37 @@ pub(super) fn write(handle: u64, ptr: u64, len: u64) -> Result<u64, Errno> {
 
 /// Starts a new file, to be written to the card when its handle is closed.
 pub(super) fn create(path: u64, len: u64) -> Result<u64, Errno> {
-    let path = user_string(path, len, MAX_PATH)?;
+    let path = user_path(path, len)?;
     fs::check_writable(&path).map_err(errno)?;
     with_running(|running| running.handles.insert(Open::NewFile { path, data: FileBuffer::new() }))
 }
 
 pub(super) fn remove(path: u64, len: u64) -> Result<u64, Errno> {
-    fs::remove(&user_string(path, len, MAX_PATH)?).map(|()| 0).map_err(errno)
+    fs::remove(&user_path(path, len)?).map(|()| 0).map_err(errno)
 }
 
 pub(super) fn make_dir(path: u64, len: u64) -> Result<u64, Errno> {
-    fs::create_dir(&user_string(path, len, MAX_PATH)?).map(|()| 0).map_err(errno)
+    fs::create_dir(&user_path(path, len)?).map(|()| 0).map_err(errno)
+}
+
+pub(super) fn change_dir(path: u64, len: u64) -> Result<u64, Errno> {
+    let path = user_path(path, len)?;
+    if path.len() > MAX_PATH {
+        return Err(Errno::Invalid);
+    }
+    fs::check_dir(&path).map_err(errno)?;
+    with_running(|running| running.cwd = path);
+    Ok(0)
+}
+
+pub(super) fn current_dir(buf: u64, len: u64) -> Result<u64, Errno> {
+    with_running(|running| {
+        if running.cwd.len() as u64 > len {
+            return Err(Errno::Invalid);
+        }
+        running.memory.write_user(buf, running.cwd.as_bytes()).map_err(|_| Errno::Fault)?;
+        Ok(running.cwd.len() as u64)
+    })
 }
 
 /// Makes a pipe and writes its read and write handles to `ends`.
@@ -290,21 +316,22 @@ pub(super) fn close(handle: u64) -> Result<u64, Errno> {
 }
 
 pub(super) fn spawn(path: u64, path_len: u64, args: u64, args_len: u64, input: u64, output: u64) -> Result<u64, Errno> {
-    let path = user_string(path, path_len, MAX_PATH)?;
+    let path = user_path(path, path_len)?;
     let args = user_string(args, args_len, MAX_ARGS)?;
     // Checked first: the child shouldn't start if its handle has nowhere to go. Only this
     // program opens its handles, and it is busy in here.
-    let io = with_running(|running| {
+    let (io, cwd) = with_running(|running| {
         if !running.handles.has_room() {
             return Err(Errno::TooMany);
         }
-        Ok(Io { input: stream_for(running, input, End::Read)?, output: stream_for(running, output, End::Write)? })
+        let io = Io { input: stream_for(running, input, End::Read)?, output: stream_for(running, output, End::Write)? };
+        Ok((io, running.cwd.clone()))
     })?;
     let file = FileBuffer::adopt(fs::read_file(&path).map_err(errno)?)?;
     let program = elf::parse(&file).map_err(|_| Errno::NotExecutable)?;
     let name = path.rsplit('/').next().unwrap_or(&path);
     let parent = sched::current();
-    let child = super::spawn_with(name, Code::Elf(&program), &args, io, Some(parent)).map_err(|error| match error {
+    let child = super::spawn_with(name, Code::Elf(&program), &args, io, Some(parent), &cwd).map_err(|error| match error {
         SpawnError::TooManyPrograms => Errno::TooMany,
         SpawnError::ArgsTooLong => Errno::Invalid,
         SpawnError::OutOfMemory => Errno::NoMemory,

@@ -23,6 +23,7 @@
 
 #![no_std]
 
+pub mod env;
 pub mod fs;
 pub mod heap;
 pub mod io;

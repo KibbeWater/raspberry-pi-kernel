@@ -165,6 +165,8 @@ struct Running {
     io: Io,
     /// The program that started it, which reports how it ends; `None` for the shell's.
     parent: Option<TaskId>,
+    /// Its current directory: absolute, resolved, at most `MAX_PATH` bytes.
+    cwd: String,
 }
 
 /// Where a program's `INPUT` comes from, or its `OUTPUT` goes.
@@ -225,13 +227,14 @@ impl Process {
     }
 }
 
-/// Starts a program called `name` in an address space of its own, with `args`, on the console.
-pub fn spawn(name: &str, code: Code, args: &str) -> Result<Process, SpawnError> {
-    spawn_with(name, code, args, Io::console(), None)
+/// Starts a program called `name` in an address space of its own, with `args`, on the console,
+/// in the current directory `cwd` (absolute and resolved).
+pub fn spawn(name: &str, code: Code, args: &str, cwd: &str) -> Result<Process, SpawnError> {
+    spawn_with(name, code, args, Io::console(), None, cwd)
 }
 
 /// Starts a program with `io`, as a child of `parent` if it has one.
-fn spawn_with(name: &str, code: Code, args: &str, io: Io, parent: Option<TaskId>) -> Result<Process, SpawnError> {
+fn spawn_with(name: &str, code: Code, args: &str, io: Io, parent: Option<TaskId>, cwd: &str) -> Result<Process, SpawnError> {
     if args.len() > MAX_ARGS {
         return Err(SpawnError::ArgsTooLong);
     }
@@ -292,6 +295,7 @@ fn spawn_with(name: &str, code: Code, args: &str, io: Io, parent: Option<TaskId>
         fp: Box::new(FpState::new()),
         io,
         parent,
+        cwd: cwd.into(),
     };
     // Registered under the lock, so the program can't make a system call before it is known.
     let id = PROCESSES.lock(|processes| {
@@ -466,6 +470,8 @@ fn syscall(call: Syscall) -> Result<u64, Errno> {
         Syscall::Create { path, len } => handles::create(path, len),
         Syscall::Remove { path, len } => handles::remove(path, len),
         Syscall::MakeDir { path, len } => handles::make_dir(path, len),
+        Syscall::ChangeDir { path, len } => handles::change_dir(path, len),
+        Syscall::CurrentDir { buf, len } => handles::current_dir(buf, len),
         Syscall::Draw { handle, x, y, width, height, pixels } => handles::draw(handle, x, y, width, height, pixels),
         Syscall::Read { handle, ptr, len } => handles::read(handle, ptr, len),
         Syscall::Open { path, len } => handles::open(path, len),

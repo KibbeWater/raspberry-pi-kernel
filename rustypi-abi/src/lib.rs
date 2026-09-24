@@ -12,6 +12,10 @@
 //! the command line, UTF-8) and x1 holding their length in bytes. They lie at the top of its
 //! stack, which the stack pointer starts just below.
 //!
+//! Paths are UTF-8 and `/`-separated. One starting with `/` is from the root of the SD card;
+//! any other is from the program's current directory, which starts as its parent's (see
+//! `ChangeDir`). `.` and `..` work as usual, and `..` at the root stays there.
+//!
 //! No dependencies and no allocation, so user programs can use it without a heap.
 
 #![cfg_attr(not(test), no_std)]
@@ -43,7 +47,7 @@ pub const MAX_READ: usize = 256;
 /// Most bytes one `Random` fills.
 pub const MAX_RANDOM: usize = 256;
 
-/// Longest path `Open` and `OpenDir` take, in bytes.
+/// Longest path any call takes, in bytes, and the longest a current directory can be.
 pub const MAX_PATH: usize = 256;
 
 /// Biggest file `Open` and `Spawn` take, and `Create` writes, in bytes: the kernel holds it
@@ -87,6 +91,8 @@ pub enum Number {
     Create = 17,
     Remove = 18,
     MakeDir = 19,
+    ChangeDir = 20,
+    CurrentDir = 21,
 }
 
 impl Number {
@@ -112,6 +118,8 @@ impl Number {
             17 => Number::Create,
             18 => Number::Remove,
             19 => Number::MakeDir,
+            20 => Number::ChangeDir,
+            21 => Number::CurrentDir,
             _ => return None,
         })
     }
@@ -144,8 +152,7 @@ pub enum Syscall {
     /// Fills up to `len` bytes (at most `MAX_RANDOM`) at `ptr` with random bytes from the
     /// hardware generator. Returns how many were filled.
     Random { ptr: u64, len: u64 },
-    /// Opens the file at the UTF-8 path `path..path + len` for reading. Returns a handle.
-    /// Paths start at the root of the SD card, with or without a leading `/`.
+    /// Opens the file at the path `path..path + len` for reading. Returns a handle.
     Open { path: u64, len: u64 },
     /// Opens a directory, to list with `ReadDir`. Returns a handle.
     OpenDir { path: u64, len: u64 },
@@ -187,6 +194,13 @@ pub enum Syscall {
     Remove { path: u64, len: u64 },
     /// Makes a directory at the path.
     MakeDir { path: u64, len: u64 },
+    /// Makes the directory at the path the program's current directory, which the programs
+    /// it starts from then on begin in too. `NotFound` or `NotADirectory` if it isn't one,
+    /// `Invalid` if the result would be longer than `MAX_PATH`.
+    ChangeDir { path: u64, len: u64 },
+    /// Writes the current directory, an absolute path, to `buf` and returns its length in
+    /// bytes. `Invalid` if it is longer than `len` (it is at most `MAX_PATH`).
+    CurrentDir { buf: u64, len: u64 },
 }
 
 /// The registers a system call is made with.
@@ -221,6 +235,8 @@ impl Syscall {
             Syscall::Create { .. } => Number::Create,
             Syscall::Remove { .. } => Number::Remove,
             Syscall::MakeDir { .. } => Number::MakeDir,
+            Syscall::ChangeDir { .. } => Number::ChangeDir,
+            Syscall::CurrentDir { .. } => Number::CurrentDir,
         }
     }
 
@@ -237,7 +253,9 @@ impl Syscall {
             | Syscall::OpenDir { path, len }
             | Syscall::Create { path, len }
             | Syscall::Remove { path, len }
-            | Syscall::MakeDir { path, len } => [path, len, 0, 0, 0, 0],
+            | Syscall::MakeDir { path, len }
+            | Syscall::ChangeDir { path, len } => [path, len, 0, 0, 0, 0],
+            Syscall::CurrentDir { buf, len } => [buf, len, 0, 0, 0, 0],
             Syscall::ReadDir { handle, entry } => [handle, entry, 0, 0, 0, 0],
             Syscall::Close { handle } | Syscall::Wait { handle } => [handle, 0, 0, 0, 0, 0],
             Syscall::Spawn { path, path_len, args, args_len, input, output } => {
@@ -279,6 +297,8 @@ impl Syscall {
             Number::Create => Syscall::Create { path: a0, len: a1 },
             Number::Remove => Syscall::Remove { path: a0, len: a1 },
             Number::MakeDir => Syscall::MakeDir { path: a0, len: a1 },
+            Number::ChangeDir => Syscall::ChangeDir { path: a0, len: a1 },
+            Number::CurrentDir => Syscall::CurrentDir { buf: a0, len: a1 },
         })
     }
 }
@@ -506,7 +526,7 @@ pub const fn decode_result(x0: u64) -> Result<u64, Errno> {
 mod tests {
     use super::*;
 
-    const ALL: [Syscall; 21] = [
+    const ALL: [Syscall; 23] = [
         Syscall::Exit { code: 0 },
         Syscall::Exit { code: -7 },
         Syscall::Write { handle: OUTPUT, ptr: 0x8000_0000, len: 12 },
@@ -528,6 +548,8 @@ mod tests {
         Syscall::Create { path: 0x8000_3000, len: 8 },
         Syscall::Remove { path: 0x8000_3000, len: 8 },
         Syscall::MakeDir { path: 0x8000_3000, len: 4 },
+        Syscall::ChangeDir { path: 0x8000_3000, len: 4 },
+        Syscall::CurrentDir { buf: 0x8000_3000, len: 256 },
     ];
 
     #[test]

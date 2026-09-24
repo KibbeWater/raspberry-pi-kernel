@@ -1,5 +1,5 @@
-//! Files and directories on the SD card. Paths start at its root, with or without a leading
-//! `/`. Files the Pi needs to boot (firmware, `config.txt`, kernel, device trees, overlays)
+//! Files and directories on the SD card. Paths starting with `/` are from its root, others
+//! from the current directory (`env::current_dir`). Files the Pi needs to boot (firmware, `config.txt`, kernel, device trees, overlays)
 //! can be read but not changed: that's `Protected`.
 
 extern crate alloc;

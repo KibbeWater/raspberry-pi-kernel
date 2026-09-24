@@ -19,6 +19,7 @@ mod system;
 mod tasks;
 
 use alloc::format;
+use alloc::string::String;
 use rustypi_core::sched::TaskId;
 use rustypi_core::session::{LineKind, Reply};
 use crate::process;
@@ -77,7 +78,7 @@ fn commands() -> impl Iterator<Item = &'static Command> {
     GROUPS.iter().flat_map(|group| group.iter())
 }
 
-fn usage(command: &Command) -> alloc::string::String {
+fn usage(command: &Command) -> String {
     if command.args.is_empty() {
         command.name.into()
     } else {
@@ -90,11 +91,18 @@ pub struct Shell {
     led: led::Led,
     /// The program that gets typed lines as input, if it is still running.
     foreground: Option<TaskId>,
+    /// The current directory: absolute and resolved. Programs started from here begin in it.
+    cwd: String,
 }
 
 impl Shell {
     pub fn new() -> Self {
-        Shell { led: led::Led::new(), foreground: None }
+        Shell { led: led::Led::new(), foreground: None, cwd: "/".into() }
+    }
+
+    /// `path` from the current directory.
+    fn path(&self, path: &str) -> String {
+        rustypi_core::path::resolve(&self.cwd, path)
     }
 
     /// Runs one command line, or passes it to the foreground program. Returns an action to
@@ -131,7 +139,7 @@ impl Shell {
         let Some(command) = commands().find(|command| command.name == name) else {
             if text.is_empty() {
                 reply.rsp("type help for a list of commands");
-            } else if let Some(target @ programs::Target::File(_)) = programs::find(name) {
+            } else if let Some(target @ programs::Target::File(_)) = programs::find(self, name) {
                 let (args, background) = programs::split_background(args);
                 programs::start(self, target, args, background, reply);
             } else {
