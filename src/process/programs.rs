@@ -5,13 +5,14 @@
 //! would call into kernel memory (for formatting, panics, memcpy...), which EL0 can't run.
 
 use core::arch::global_asm;
-use rustypi_abi::{Errno, Number};
+use rustypi_abi::{Errno, Number, OUTPUT};
 use super::Exit;
 
 global_asm!(
     include_str!("programs.s"),
     EXIT = const Number::Exit as u64,
     WRITE = const Number::Write as u64,
+    OUTPUT = const OUTPUT,
     SLEEP = const Number::Sleep as u64,
     UPTIME = const Number::Uptime as u64,
     MAP = const Number::Map as u64,

@@ -21,9 +21,10 @@ user_image_start:
 .balign 4
 .global user_hello
 user_hello:
-    adr     x0, .Lhello_text
-    adr     x1, .Lhello_end
-    sub     x1, x1, x0
+    mov     x0, #{OUTPUT}
+    adr     x1, .Lhello_text
+    adr     x2, .Lhello_end
+    sub     x2, x2, x1
     USER_SYSCALL {WRITE}
     mov     x0, #0
     USER_SYSCALL {EXIT}
@@ -43,8 +44,9 @@ user_ticker:
     sub     sp, sp, #16
     str     x20, [sp]
 .Lticker_loop:
-    adr     x0, .Lticker_text
-    mov     x1, #5
+    mov     x0, #{OUTPUT}
+    adr     x1, .Lticker_text
+    mov     x2, #5
     USER_SYSCALL {WRITE}
     mov     x0, #50000              // 50ms
     USER_SYSCALL {SLEEP}
@@ -74,18 +76,20 @@ user_ticker:
 user_abi:
     // 1: writing from kernel memory is a fault.
     mov     x19, #1
-    mov     x0, #0x80000
-    mov     x1, #4
+    mov     x0, #{OUTPUT}
+    mov     x1, #0x80000
+    mov     x2, #4
     USER_SYSCALL {WRITE}
     cmn     x0, #{EFAULT}
     b.ne    .Labi_fail
     // 2: so is a buffer running off the end of the code into the unmapped page after it.
     mov     x19, #2
-    adr     x0, user_image_end
-    add     x0, x0, #0xFFF
-    and     x0, x0, #0xFFFFFFFFFFFFF000
-    sub     x0, x0, #2
-    mov     x1, #4
+    mov     x0, #{OUTPUT}
+    adr     x1, user_image_end
+    add     x1, x1, #0xFFF
+    and     x1, x1, #0xFFFFFFFFFFFFF000
+    sub     x1, x1, #2
+    mov     x2, #4
     USER_SYSCALL {WRITE}
     cmn     x0, #{EFAULT}
     b.ne    .Labi_fail
@@ -103,8 +107,9 @@ user_abi:
     b.ne    .Labi_fail
     // 5: an empty write writes nothing.
     mov     x19, #5
-    adr     x0, .Lhello_text
-    mov     x1, #0
+    mov     x0, #{OUTPUT}
+    adr     x1, .Lhello_text
+    mov     x2, #0
     USER_SYSCALL {WRITE}
     cbnz    x0, .Labi_fail
     // 6: uptime moves forward across a 1ms sleep, which returns 0.
