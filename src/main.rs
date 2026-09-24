@@ -31,7 +31,7 @@ const NAME: &str = "RustyPI";
 /// How often the Pi reports its receive counters, even when nothing talks to it.
 const STAT_INTERVAL: Duration = Duration::from_secs(5);
 
-/// The link's receive counters, published by the shell task for the `stat` task.
+/// The link's receive counters, published by the link task for the `stat` task.
 static LINK_STATS: IrqLock<Stats> = IrqLock::new(Stats {
     rx_bytes: 0,
     rx_errors: 0,
@@ -102,12 +102,16 @@ fn link_task() {
                 Some(seq) if PENDING.load(Ordering::Relaxed) == seq as u32 + 1 => {
                     link::send_fmt("BUSY", format_args!("{seq}"));
                 }
+                // Without a sequence number, the session rejects it. Marked pending before it
+                // is queued, so the shell can't answer it first; a frame that didn't fit isn't
+                // pending, so the Uno's retransmit gets another try.
                 seq => {
                     if let Some(seq) = seq {
                         PENDING.store(seq as u32 + 1, Ordering::Relaxed);
                     }
-                    // Without a sequence number, the session rejects it.
-                    deliver(Inbound::Msg(payload.into()));
+                    if !deliver(Inbound::Msg(payload.into())) {
+                        PENDING.store(0, Ordering::Relaxed);
+                    }
                 }
             },
             _ => link::send_fmt("ERR", format_args!("unknown kind {kind}")),
@@ -117,7 +121,8 @@ fn link_task() {
     }
 }
 
-fn deliver(frame: Inbound) {
+/// Queues `frame` for the shell task, false if the inbox is full and it was dropped.
+fn deliver(frame: Inbound) -> bool {
     let queued = INBOX.lock(|inbox| {
         let room = inbox.len() < INBOX_LIMIT;
         if room {
@@ -128,6 +133,7 @@ fn deliver(frame: Inbound) {
     if queued {
         sched::notify(sched::SHELL_INBOX);
     }
+    queued
 }
 
 /// Runs the commands the link task passes on, one at a time, and sends their replies.
