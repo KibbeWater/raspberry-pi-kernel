@@ -1,6 +1,6 @@
 // handles.rs
-//! What a program has open, by handle: files, directories, the children it started and pipe
-//! ends. And the system calls on them.
+//! What a program has open, by handle: files (to read, or new ones to write), directories,
+//! the children it started, pipe ends and the screen. And the system calls on them.
 //!
 //! The filesystem is read-only, and files are small, so opening a file reads it whole (up to
 //! `MAX_FILE`); reads then come from memory. Opening a directory lists it.
@@ -28,6 +28,8 @@ enum Open {
     Child(Process),
     Pipe(PipeEnd),
     Screen(console::Lease),
+    /// A file being written: it all goes to the card when the handle is closed.
+    NewFile { path: String, data: Vec<u8> },
 }
 
 /// The first handle `Handles` gives out; below it are `INPUT` and `OUTPUT`.
@@ -86,6 +88,11 @@ fn errno(error: FsError) -> Errno {
         FsError::Fat(FatError::NotFound) => Errno::NotFound,
         FsError::Fat(FatError::NotAFile) => Errno::IsADirectory,
         FsError::Fat(FatError::NotADirectory) => Errno::NotADirectory,
+        FsError::Fat(FatError::NoSpace | FatError::DirectoryFull) => Errno::NoSpace,
+        FsError::Fat(FatError::AlreadyExists) => Errno::AlreadyExists,
+        FsError::Fat(FatError::NotEmpty) => Errno::NotEmpty,
+        FsError::Fat(FatError::InvalidName | FatError::TooBig) => Errno::Invalid,
+        FsError::Protected => Errno::Protected,
         _ => Errno::Io,
     }
 }
@@ -149,17 +156,48 @@ pub(super) fn read(handle: u64, ptr: u64, len: u64) -> Result<u64, Errno> {
             Ok(count as u64)
         }
         Open::Dir { .. } => Err(Errno::IsADirectory),
-        Open::Child(_) | Open::Pipe(_) | Open::Screen(_) => Err(Errno::BadHandle),
+        Open::Child(_) | Open::Pipe(_) | Open::Screen(_) | Open::NewFile { .. } => Err(Errno::BadHandle),
     })
 }
 
-/// Writes to a pipe's write end. `OUTPUT` is handled by the caller.
+/// Writes to a pipe's write end or a new file. `OUTPUT` is handled by the caller.
 pub(super) fn write(handle: u64, ptr: u64, len: u64) -> Result<u64, Errno> {
     let pipe = with_running(|running| match running.handles.get_mut(handle)? {
-        Open::Pipe(end) if end.end() == End::Write => Ok(end.pipe()),
+        Open::Pipe(end) if end.end() == End::Write => Ok(Some(end.pipe())),
+        Open::NewFile { .. } => Ok(None),
         _ => Err(Errno::BadHandle),
     })?;
-    write_pipe(&pipe, ptr, len)
+    if let Some(pipe) = pipe {
+        return write_pipe(&pipe, ptr, len);
+    }
+    // Copied in before taking the lock again to add it.
+    let mut buf = [0; MAX_READ];
+    let bytes = copy_from_user(ptr, &mut buf[..len.min(MAX_READ as u64) as usize])?;
+    with_running(|running| match running.handles.get_mut(handle)? {
+        Open::NewFile { data, .. } => {
+            if data.len() + bytes.len() > MAX_FILE {
+                return Err(Errno::NoSpace);
+            }
+            data.extend_from_slice(bytes);
+            Ok(bytes.len() as u64)
+        }
+        _ => Err(Errno::BadHandle),
+    })
+}
+
+/// Starts a new file, to be written to the card when its handle is closed.
+pub(super) fn create(path: u64, len: u64) -> Result<u64, Errno> {
+    let path = user_string(path, len, MAX_PATH)?;
+    fs::check_writable(&path).map_err(errno)?;
+    with_running(|running| running.handles.insert(Open::NewFile { path, data: Vec::new() }))
+}
+
+pub(super) fn remove(path: u64, len: u64) -> Result<u64, Errno> {
+    fs::remove(&user_string(path, len, MAX_PATH)?).map(|()| 0).map_err(errno)
+}
+
+pub(super) fn make_dir(path: u64, len: u64) -> Result<u64, Errno> {
+    fs::create_dir(&user_string(path, len, MAX_PATH)?).map(|()| 0).map_err(errno)
 }
 
 /// Makes a pipe and writes its read and write handles to `ends`.
@@ -207,7 +245,7 @@ pub(super) fn read_dir(handle: u64, entry: u64) -> Result<u64, Errno> {
             Ok(1)
         }
         Open::File { .. } => Err(Errno::NotADirectory),
-        Open::Child(_) | Open::Pipe(_) | Open::Screen(_) => Err(Errno::BadHandle),
+        Open::Child(_) | Open::Pipe(_) | Open::Screen(_) | Open::NewFile { .. } => Err(Errno::BadHandle),
     })
 }
 
@@ -260,9 +298,14 @@ pub(super) fn draw(handle: u64, x: u64, y: u64, width: u64, height: u64, pixels:
     Ok(0)
 }
 
-/// Closing a child's handle lets it run on, unwatched.
+/// Closing a new file writes it to the card; closing a child's handle lets it run on,
+/// unwatched. Whatever needs undoing happens here, outside the lock (like the screen coming
+/// back to the console).
 pub(super) fn close(handle: u64) -> Result<u64, Errno> {
-    with_running(|running| running.handles.take(handle)).map(|_| 0)
+    match with_running(|running| running.handles.take(handle))? {
+        Open::NewFile { path, data } => fs::write_file(&path, &data).map(|()| 0).map_err(errno),
+        _ => Ok(0),
+    }
 }
 
 pub(super) fn spawn(path: u64, path_len: u64, args: u64, args_len: u64, input: u64, output: u64) -> Result<u64, Errno> {

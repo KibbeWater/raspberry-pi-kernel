@@ -15,7 +15,43 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "sd", args: "[bench|writetest]", description: "sd card info, a read speed test, or a write test", run: sd },
     Command { name: "ls", args: "[-a] [path]", description: "list a directory; -a shows dotfiles", run: ls },
     Command { name: "cat", args: "<path>", description: "show the start of a text file", run: cat },
+    Command { name: "write", args: "<path> <text>", description: "write a line of text to a file", run: write },
+    Command { name: "rm", args: "<path>", description: "remove a file or empty directory", run: rm },
+    Command { name: "mkdir", args: "<path>", description: "make a directory", run: mkdir },
 ];
+
+fn write<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+    let Some((path, text)) = args.split_once(char::is_whitespace) else {
+        return Outcome::Usage;
+    };
+    let mut line = text.trim_start().as_bytes().to_vec();
+    line.push(b'\n');
+    match sys::fs::write_file(path, &line) {
+        Ok(()) => reply.line(LineKind::Rsp, format_args!("wrote {} bytes to {}", line.len(), path)),
+        Err(error) => reply.line(LineKind::Rsp, format_args!("write: {}: {}", path, error)),
+    }
+    Outcome::Done
+}
+
+fn rm<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+    if args.is_empty() || args.contains(char::is_whitespace) {
+        return Outcome::Usage;
+    }
+    if let Err(error) = sys::fs::remove(args) {
+        reply.line(LineKind::Rsp, format_args!("rm: {}: {}", args, error));
+    }
+    Outcome::Done
+}
+
+fn mkdir<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+    if args.is_empty() || args.contains(char::is_whitespace) {
+        return Outcome::Usage;
+    }
+    if let Err(error) = sys::fs::create_dir(args) {
+        reply.line(LineKind::Rsp, format_args!("mkdir: {}: {}", args, error));
+    }
+    Outcome::Done
+}
 
 fn sd<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     match args {
@@ -69,6 +105,10 @@ fn sd<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
             hz / 1_000_000,
         )),
         None => reply.line(LineKind::Rsp, format_args!("card: {}, {}-bit bus at {} MHz", kind, width, hz / 1_000_000)),
+    }
+    match sys::fs::free_space() {
+        Ok(bytes) => reply.line(LineKind::Rsp, format_args!("free: {} MB", bytes / (1024 * 1024))),
+        Err(error) => reply.line(LineKind::Rsp, format_args!("free: {}", error)),
     }
     Outcome::Done
 }

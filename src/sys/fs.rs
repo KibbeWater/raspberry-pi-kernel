@@ -22,6 +22,8 @@ pub enum FsError {
     NotMounted,
     /// No blocks outside every partition to test writing on.
     NoSpareBlocks,
+    /// A file the Pi needs to boot, which is left alone.
+    Protected,
 }
 
 impl From<SdError> for FsError {
@@ -44,6 +46,7 @@ impl fmt::Display for FsError {
             FsError::Fat(error) => write!(f, "{}", error),
             FsError::NotMounted => write!(f, "no filesystem mounted"),
             FsError::NoSpareBlocks => write!(f, "no blocks before the first partition to test on"),
+            FsError::Protected => write!(f, "the Pi needs it to boot, so it can't be changed"),
         }
     }
 }
@@ -107,6 +110,74 @@ pub fn read_dir(path: &str) -> Result<Vec<DirEntry>, FsError> {
 /// Looks up a file or directory.
 pub fn metadata(path: &str) -> Result<DirEntry, FsError> {
     with_fs(|fs| Ok(fs.fat.metadata(path)?))
+}
+
+/// Whether `path` is something the Pi needs to boot: the firmware, its configuration, the
+/// kernel, device trees, overlays. Writing, replacing and removing leave these alone, so a
+/// bug (or a slip) can't stop the Pi booting.
+fn is_protected(path: &str) -> bool {
+    let mut parts = path.split('/').filter(|part| !part.is_empty());
+    let (Some(first), rest) = (parts.next(), parts.next()) else { return true };
+    let first = first.to_ascii_lowercase();
+    if first == "overlays" {
+        return true;
+    }
+    rest.is_none()
+        && (first == "bootcode.bin"
+            || first == "config.txt"
+            || first == "cmdline.txt"
+            || first.starts_with("start") && first.ends_with(".elf")
+            || first.starts_with("fixup") && first.ends_with(".dat")
+            || first.starts_with("kernel") && first.ends_with(".img")
+            || first.ends_with(".dtb"))
+}
+
+/// Checks a file could be written at `path`: not protected, its directory exists, and it
+/// isn't a directory itself. For finding out early, before collecting what to write.
+pub fn check_writable(path: &str) -> Result<(), FsError> {
+    if is_protected(path) {
+        return Err(FsError::Protected);
+    }
+    let parent = path.trim_end_matches('/').rsplit_once('/').map_or("", |(parent, _)| parent);
+    with_fs(|fs| {
+        if !parent.trim_matches('/').is_empty() && fs.fat.metadata(parent)?.kind != EntryKind::Directory {
+            return Err(FsError::Fat(FatError::NotADirectory));
+        }
+        match fs.fat.metadata(path) {
+            Ok(entry) if entry.kind == EntryKind::Directory => Err(FsError::Fat(FatError::NotAFile)),
+            Ok(_) | Err(FatError::NotFound) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    })
+}
+
+/// Creates or replaces a file with `data`, unless the Pi needs it to boot.
+pub fn write_file(path: &str, data: &[u8]) -> Result<(), FsError> {
+    if is_protected(path) {
+        return Err(FsError::Protected);
+    }
+    with_fs(|fs| Ok(fs.fat.write_file(path, data)?))
+}
+
+/// Makes a directory.
+pub fn create_dir(path: &str) -> Result<(), FsError> {
+    if is_protected(path) {
+        return Err(FsError::Protected);
+    }
+    with_fs(|fs| Ok(fs.fat.create_dir(path)?))
+}
+
+/// Removes a file or an empty directory, unless the Pi needs it to boot.
+pub fn remove(path: &str) -> Result<(), FsError> {
+    if is_protected(path) {
+        return Err(FsError::Protected);
+    }
+    with_fs(|fs| Ok(fs.fat.remove(path)?))
+}
+
+/// Free space on the volume, in bytes. Reads the whole FAT.
+pub fn free_space() -> Result<u64, FsError> {
+    with_fs(|fs| Ok(fs.fat.free_clusters()? as u64 * fs.info.cluster_size as u64))
 }
 
 /// Blocks the write test uses.

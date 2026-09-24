@@ -83,6 +83,9 @@ pub enum Number {
     Pipe = 14,
     OpenScreen = 15,
     Draw = 16,
+    Create = 17,
+    Remove = 18,
+    MakeDir = 19,
 }
 
 impl Number {
@@ -105,6 +108,9 @@ impl Number {
             14 => Number::Pipe,
             15 => Number::OpenScreen,
             16 => Number::Draw,
+            17 => Number::Create,
+            18 => Number::Remove,
+            19 => Number::MakeDir,
             _ => return None,
         })
     }
@@ -169,6 +175,15 @@ pub enum Syscall {
     /// (`x`, `y`). Each pixel is a u32 `0x00RRGGBB`, whatever the screen's own layout.
     /// Whatever falls off the screen is left out.
     Draw { handle: u64, x: u64, y: u64, width: u64, height: u64, pixels: u64 },
+    /// Starts a new file at the path, replacing any file there once written. Returns a handle
+    /// to `Write` it; closing the handle writes it all to the card at once (so a program that
+    /// dies part way leaves the old file as it was). `Protected` for files the Pi needs to
+    /// boot. Closing reports whether the write worked.
+    Create { path: u64, len: u64 },
+    /// Removes the file, or empty directory, at the path.
+    Remove { path: u64, len: u64 },
+    /// Makes a directory at the path.
+    MakeDir { path: u64, len: u64 },
 }
 
 /// The registers a system call is made with.
@@ -200,6 +215,9 @@ impl Syscall {
             Syscall::Pipe { .. } => Number::Pipe,
             Syscall::OpenScreen { .. } => Number::OpenScreen,
             Syscall::Draw { .. } => Number::Draw,
+            Syscall::Create { .. } => Number::Create,
+            Syscall::Remove { .. } => Number::Remove,
+            Syscall::MakeDir { .. } => Number::MakeDir,
         }
     }
 
@@ -212,7 +230,11 @@ impl Syscall {
             Syscall::Pipe { ends } => [ends, 0, 0, 0, 0, 0],
             Syscall::OpenScreen { size } => [size, 0, 0, 0, 0, 0],
             Syscall::Draw { handle, x, y, width, height, pixels } => [handle, x, y, width, height, pixels],
-            Syscall::Open { path, len } | Syscall::OpenDir { path, len } => [path, len, 0, 0, 0, 0],
+            Syscall::Open { path, len }
+            | Syscall::OpenDir { path, len }
+            | Syscall::Create { path, len }
+            | Syscall::Remove { path, len }
+            | Syscall::MakeDir { path, len } => [path, len, 0, 0, 0, 0],
             Syscall::ReadDir { handle, entry } => [handle, entry, 0, 0, 0, 0],
             Syscall::Close { handle } | Syscall::Wait { handle } => [handle, 0, 0, 0, 0, 0],
             Syscall::Spawn { path, path_len, args, args_len, input, output } => {
@@ -251,6 +273,9 @@ impl Syscall {
             Number::Pipe => Syscall::Pipe { ends: a0 },
             Number::OpenScreen => Syscall::OpenScreen { size: a0 },
             Number::Draw => Syscall::Draw { handle: a0, x: a1, y: a2, width: a3, height: a4, pixels: a5 },
+            Number::Create => Syscall::Create { path: a0, len: a1 },
+            Number::Remove => Syscall::Remove { path: a0, len: a1 },
+            Number::MakeDir => Syscall::MakeDir { path: a0, len: a1 },
         })
     }
 }
@@ -286,6 +311,14 @@ pub enum Errno {
     NoDevice,
     /// Someone else is using it.
     Busy,
+    /// The card is full (or FAT16's root directory is).
+    NoSpace,
+    /// A file the Pi needs to boot, which programs may not change.
+    Protected,
+    /// Something by that name exists already.
+    AlreadyExists,
+    /// The directory still has entries.
+    NotEmpty,
     /// A code this version of the ABI doesn't know, from a newer kernel.
     Unknown,
 }
@@ -308,6 +341,10 @@ impl Errno {
             Errno::BrokenPipe => 12,
             Errno::NoDevice => 13,
             Errno::Busy => 14,
+            Errno::NoSpace => 15,
+            Errno::Protected => 16,
+            Errno::AlreadyExists => 17,
+            Errno::NotEmpty => 18,
             Errno::Unknown => 4095,
         }
     }
@@ -328,6 +365,10 @@ impl Errno {
             12 => Errno::BrokenPipe,
             13 => Errno::NoDevice,
             14 => Errno::Busy,
+            15 => Errno::NoSpace,
+            16 => Errno::Protected,
+            17 => Errno::AlreadyExists,
+            18 => Errno::NotEmpty,
             _ => Errno::Unknown,
         }
     }
@@ -462,7 +503,7 @@ pub const fn decode_result(x0: u64) -> Result<u64, Errno> {
 mod tests {
     use super::*;
 
-    const ALL: [Syscall; 18] = [
+    const ALL: [Syscall; 21] = [
         Syscall::Exit { code: 0 },
         Syscall::Exit { code: -7 },
         Syscall::Write { handle: OUTPUT, ptr: 0x8000_0000, len: 12 },
@@ -481,6 +522,9 @@ mod tests {
         Syscall::Pipe { ends: 0x8000_5000 },
         Syscall::OpenScreen { size: 0x8000_6000 },
         Syscall::Draw { handle: 3, x: 10, y: 20, width: 64, height: 48, pixels: 0x8001_0000 },
+        Syscall::Create { path: 0x8000_3000, len: 8 },
+        Syscall::Remove { path: 0x8000_3000, len: 8 },
+        Syscall::MakeDir { path: 0x8000_3000, len: 4 },
     ];
 
     #[test]
@@ -536,6 +580,10 @@ mod tests {
             Errno::BrokenPipe,
             Errno::NoDevice,
             Errno::Busy,
+            Errno::NoSpace,
+            Errno::Protected,
+            Errno::AlreadyExists,
+            Errno::NotEmpty,
         ]
         .map(Err);
         for result in [Ok(0), Ok(42), Ok(MAX_RESULT)].into_iter().chain(errors) {
