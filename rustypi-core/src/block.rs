@@ -29,6 +29,15 @@ pub trait BlockDevice {
     type Error: fmt::Debug + fmt::Display;
 
     fn read_block(&mut self, lba: Lba, block: &mut Block) -> Result<(), Self::Error>;
+
+    /// Reads consecutive blocks from `lba` on. Devices that can do it in one go (an SD card's
+    /// multi-block read) override this; the default reads them one at a time.
+    fn read_blocks(&mut self, lba: Lba, blocks: &mut [Block]) -> Result<(), Self::Error> {
+        for (i, block) in blocks.iter_mut().enumerate() {
+            self.read_block(lba.offset(i as u64), block)?;
+        }
+        Ok(())
+    }
 }
 
 impl<D: BlockDevice + ?Sized> BlockDevice for &mut D {
@@ -36,6 +45,10 @@ impl<D: BlockDevice + ?Sized> BlockDevice for &mut D {
 
     fn read_block(&mut self, lba: Lba, block: &mut Block) -> Result<(), Self::Error> {
         (**self).read_block(lba, block)
+    }
+
+    fn read_blocks(&mut self, lba: Lba, blocks: &mut [Block]) -> Result<(), Self::Error> {
+        (**self).read_blocks(lba, blocks)
     }
 }
 
@@ -48,7 +61,10 @@ pub(crate) mod memory {
     #[derive(Default)]
     pub struct MemoryDisk {
         blocks: BTreeMap<u64, Block>,
+        /// Blocks read.
         pub reads: usize,
+        /// Read commands: a multi-block read is one.
+        pub commands: usize,
     }
 
     impl MemoryDisk {
@@ -71,8 +87,15 @@ pub(crate) mod memory {
         type Error = &'static str;
 
         fn read_block(&mut self, lba: Lba, block: &mut Block) -> Result<(), Self::Error> {
-            self.reads += 1;
-            *block = self.blocks.get(&lba.0).copied().unwrap_or([0; BLOCK_SIZE]);
+            self.read_blocks(lba, core::slice::from_mut(block))
+        }
+
+        fn read_blocks(&mut self, lba: Lba, blocks: &mut [Block]) -> Result<(), Self::Error> {
+            self.commands += 1;
+            for (i, block) in blocks.iter_mut().enumerate() {
+                self.reads += 1;
+                *block = self.blocks.get(&(lba.0 + i as u64)).copied().unwrap_or([0; BLOCK_SIZE]);
+            }
             Ok(())
         }
     }

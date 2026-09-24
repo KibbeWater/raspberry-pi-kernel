@@ -53,6 +53,8 @@ pub struct MountInfo {
     /// SDHC/SDXC rather than a standard capacity card.
     pub high_capacity: bool,
     pub card_blocks: Option<u64>,
+    /// Data lines in use, and the SD clock.
+    pub bus: (u8, u32),
 }
 
 struct Mounted {
@@ -69,7 +71,7 @@ pub fn mount() -> Result<MountInfo, FsError> {
     let mut block0 = [0; BLOCK_SIZE];
     card.read_block(Lba(0), &mut block0)?;
     let volume = mbr::find_fat_volume(&block0).ok_or(FsError::NoFatVolume)?;
-    let (high_capacity, card_blocks) = (card.high_capacity(), card.blocks());
+    let (high_capacity, card_blocks, bus) = (card.high_capacity(), card.blocks(), card.bus());
     let fat = Fat::mount(card, volume.start())?;
     let info = MountInfo {
         fat_type: fat.fat_type(),
@@ -78,6 +80,7 @@ pub fn mount() -> Result<MountInfo, FsError> {
         cluster_size: fat.cluster_size(),
         high_capacity,
         card_blocks,
+        bus,
     };
     let mounted = Mounted { fat, info: info.clone() };
     FS.lock(|fs| *fs = Some(mounted));

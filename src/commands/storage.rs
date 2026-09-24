@@ -12,14 +12,19 @@ use crate::sys::fs::EntryKind;
 const MAX_LISTING_LINES: usize = 40;
 
 pub const COMMANDS: &[Command] = &[
-    Command { name: "sd", args: "", description: "sd card and filesystem info", run: sd },
+    Command { name: "sd", args: "[bench]", description: "sd card and filesystem info, or a read speed test", run: sd },
     Command { name: "ls", args: "[-a] [path]", description: "list a directory; -a shows dotfiles", run: ls },
     Command { name: "cat", args: "<path>", description: "show the start of a text file", run: cat },
 ];
 
 fn sd<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
-    if !args.is_empty() {
-        return Outcome::Usage;
+    match args {
+        "" => {}
+        "bench" => {
+            bench(reply);
+            return Outcome::Done;
+        }
+        _ => return Outcome::Usage,
     }
     let info = match sys::fs::info() {
         Ok(info) => info,
@@ -42,11 +47,42 @@ fn sd<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
         info.cluster_size / 1024,
     ));
     let kind = if info.high_capacity { "SDHC/SDXC" } else { "SDSC" };
+    let (width, hz) = info.bus;
     match info.card_blocks {
-        Some(blocks) => reply.line(LineKind::Rsp, format_args!("card: {}, {} MB", kind, blocks / 2048)),
-        None => reply.line(LineKind::Rsp, format_args!("card: {}", kind)),
+        Some(blocks) => reply.line(LineKind::Rsp, format_args!(
+            "card: {}, {} MB, {}-bit bus at {} MHz",
+            kind,
+            blocks / 2048,
+            width,
+            hz / 1_000_000,
+        )),
+        None => reply.line(LineKind::Rsp, format_args!("card: {}, {}-bit bus at {} MHz", kind, width, hz / 1_000_000)),
     }
     Outcome::Done
+}
+
+/// Times reading the biggest file in the root directory.
+fn bench(reply: &mut Reply) {
+    let biggest = sys::fs::read_dir("/").ok().and_then(|entries| {
+        entries.into_iter().filter(|entry| entry.kind == EntryKind::File).max_by_key(|entry| entry.size)
+    });
+    let Some(file) = biggest else {
+        reply.rsp("sd bench: no file to read");
+        return;
+    };
+    let start = sys::uptime();
+    let result = sys::fs::read_file(&file.name);
+    let micros = (sys::uptime() - start).as_micros().max(1) as u64;
+    match result {
+        Ok(bytes) => reply.line(LineKind::Rsp, format_args!(
+            "read {} ({} KB) in {} ms: {} KB/s",
+            file.name,
+            bytes.len() / 1024,
+            micros / 1000,
+            bytes.len() as u64 * 1_000_000 / 1024 / micros,
+        )),
+        Err(error) => reply.line(LineKind::Rsp, format_args!("sd bench: {}: {}", file.name, error)),
+    }
 }
 
 /// Dotfiles (like the `._*` files macOS leaves on FAT volumes) are hidden unless `-a` is

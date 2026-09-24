@@ -282,35 +282,60 @@ impl<D: BlockDevice> Fat<D> {
     }
 
     fn read_sectors(&mut self, start: u64, count: u64) -> Result<Vec<u8>, D::Error> {
-        let mut bytes = Vec::with_capacity(count as usize * BLOCK_SIZE);
-        let mut block = [0; BLOCK_SIZE];
-        for sector in start..start + count {
-            self.device.read_block(self.start.offset(sector), &mut block)?;
-            bytes.extend_from_slice(&block);
-        }
+        let mut bytes = Vec::new();
+        self.read_sectors_into(start, count, &mut bytes)?;
         Ok(bytes)
     }
 
-    /// Reads the chain starting at `first`: `limit` bytes of it, or all of it.
+    /// Appends `count` sectors from `start` to `bytes`, in one read.
+    fn read_sectors_into(&mut self, start: u64, count: u64, bytes: &mut Vec<u8>) -> Result<(), D::Error> {
+        let at = bytes.len();
+        bytes.resize(at + count as usize * BLOCK_SIZE, 0);
+        let (blocks, _) = bytes[at..].as_chunks_mut::<BLOCK_SIZE>();
+        self.device.read_blocks(self.start.offset(start), blocks)?;
+        Ok(())
+    }
+
+    /// Reads the chain starting at `first`: `limit` bytes of it, or all of it. Runs of
+    /// consecutive clusters (the usual layout of a file) are read in one go.
     fn read_chain(&mut self, first: Cluster, limit: Option<usize>) -> Result<Vec<u8>, D::Error> {
         let mut bytes = Vec::new();
         if limit == Some(0) {
             return Ok(bytes);
         }
+        let cluster_bytes = self.cluster_size();
+        let max_run = (MAX_RUN_SECTORS / self.sectors_per_cluster).max(1);
+        let covered = |bytes: usize| limit.is_some_and(|limit| bytes >= limit);
         let mut cluster = Some(first);
         let mut steps = 0u32;
-        while let Some(current) = cluster {
-            if limit.is_some_and(|limit| bytes.len() >= limit) {
+        while let Some(start) = cluster {
+            if covered(bytes.len()) {
                 break;
             }
-            self.check(current.0)?;
-            steps += 1;
-            if steps > self.cluster_count {
-                return Err(FatError::ChainLoop);
+            // Extend the run while the chain goes on to the very next cluster.
+            let mut run = 0u64;
+            let mut current = start;
+            loop {
+                self.check(current.0)?;
+                steps += 1;
+                if steps > self.cluster_count {
+                    return Err(FatError::ChainLoop);
+                }
+                run += 1;
+                cluster = self.next(current)?;
+                match cluster {
+                    Some(next)
+                        if next.0 == current.0 + 1
+                            && run < max_run
+                            && !covered(bytes.len() + run as usize * cluster_bytes) =>
+                    {
+                        current = next;
+                    }
+                    _ => break,
+                }
             }
-            let sector = self.data_start + (current.0 as u64 - 2) * self.sectors_per_cluster;
-            bytes.extend(self.read_sectors(sector, self.sectors_per_cluster)?);
-            cluster = self.next(current)?;
+            let sector = self.data_start + (start.0 as u64 - 2) * self.sectors_per_cluster;
+            self.read_sectors_into(sector, run * self.sectors_per_cluster, &mut bytes)?;
         }
         if let Some(limit) = limit {
             if bytes.len() < limit {
@@ -353,6 +378,9 @@ impl<D: BlockDevice> Fat<D> {
         }
     }
 }
+
+/// Most sectors read in one go: a run of clusters longer than this is read in pieces.
+const MAX_RUN_SECTORS: u64 = 256;
 
 fn names_match(a: &str, b: &str) -> bool {
     a.chars().flat_map(char::to_lowercase).eq(b.chars().flat_map(char::to_lowercase))
@@ -706,6 +734,17 @@ mod tests {
                 assert_eq!(fat.read_file("/empty").unwrap(), b"");
                 assert_eq!(fat.read_file("overlays/readme").unwrap(), b"overlays go here\n");
             }
+        }
+    }
+
+    #[test]
+    fn contiguous_files_are_read_in_one_command() {
+        for (scatter, commands) in [(false, 1), (true, 10)] {
+            let (mut fat, big) = sample(FatType::Fat32, scatter);
+            let entry = fat.metadata("/kernel8 image with a long name.img").unwrap();
+            let before = fat.device.commands;
+            assert_eq!(fat.read_chain(entry.first_cluster(), Some(entry.size as usize)).unwrap(), big);
+            assert_eq!(fat.device.commands - before, commands, "scatter {}", scatter);
         }
     }
 

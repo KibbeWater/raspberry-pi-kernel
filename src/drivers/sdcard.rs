@@ -1,7 +1,9 @@
 // sdcard.rs
-//! SD card through the Arasan EMMC controller (an SDHCI host), read-only, 1-bit bus at
-//! 25MHz, polled. Follows the SD Physical Layer Simplified Specification's initialisation:
-//! reset, CMD0, CMD8, ACMD41 until ready, CMD2, CMD3, CMD7.
+//! SD card through the Arasan EMMC controller (an SDHCI host), read-only, polled. Follows
+//! the SD Physical Layer Simplified Specification's initialisation: reset, CMD0, CMD8,
+//! ACMD41 until ready, CMD2, CMD3, CMD7. Then it speeds up where the card allows: the 4-bit
+//! bus (ACMD6) and high-speed mode at 50MHz (CMD6), falling back to 1 bit and 25MHz.
+//! Consecutive blocks are read with one multi-block command.
 //!
 //! On the Pi 3 the card slot's pins (GPIO 48-53) are wired to the firmware's SDHOST
 //! controller at boot; they are switched over to the EMMC controller here.
@@ -34,6 +36,10 @@ const SLOTISR_VER: usize = EMMC_BASE + 0xFC;
 const CMD_INHIBIT: u32 = 1 << 0;
 const DAT_INHIBIT: u32 = 1 << 1;
 
+// CONTROL0
+const HCTL_DWIDTH_4: u32 = 1 << 1;
+const HCTL_HS_EN: u32 = 1 << 2;
+
 // CONTROL1
 const CLK_INTLEN: u32 = 1 << 0;
 const CLK_STABLE: u32 = 1 << 1;
@@ -43,6 +49,7 @@ const CLK_DIVIDER_MASK: u32 = 0xFFC0;
 const DATA_TIMEOUT_MAX: u32 = 0xE << 16;
 const SRST_HC: u32 = 1 << 24;
 const SRST_CMD: u32 = 1 << 25;
+const SRST_DATA: u32 = 1 << 26;
 
 // INTERRUPT
 const INT_CMD_DONE: u32 = 1 << 0;
@@ -52,6 +59,10 @@ const INT_ERROR: u32 = 1 << 15;
 const INT_ALL: u32 = 0xFFFF_FFFF;
 
 // CMDTM
+const TM_BLKCNT_EN: u32 = 1 << 1;
+/// Send CMD12 (stop transmission) after the last block.
+const TM_AUTO_CMD12: u32 = 1 << 2;
+const TM_MULTI_BLOCK: u32 = 1 << 5;
 const CMD_RESPONSE_136: u32 = 1 << 16;
 const CMD_RESPONSE_48: u32 = 2 << 16;
 const CMD_RESPONSE_48_BUSY: u32 = 3 << 16;
@@ -62,6 +73,17 @@ const CMD_READ: u32 = 1 << 4;
 
 const IDENTIFICATION_HZ: u32 = 400_000;
 const TRANSFER_HZ: u32 = 25_000_000;
+const HIGH_SPEED_HZ: u32 = 50_000_000;
+
+/// ACMD6 argument: 4-bit bus.
+const BUS_WIDTH_4: u32 = 2;
+/// CMD6 argument: switch (bit 31) function group 1 to function 1, high speed; leave the
+/// other groups (0xF) alone.
+const SWITCH_HIGH_SPEED: u32 = 0x80FF_FFF1;
+/// Bytes of status CMD6 returns.
+const SWITCH_STATUS_LEN: usize = 64;
+/// Most blocks one multi-block read may ask for (BLKSIZECNT has 16 bits for the count).
+const MAX_BLOCKS_PER_READ: usize = 0xFFFF;
 
 /// CMD8 argument: 2.7-3.6V, and a check pattern the card echoes.
 const IF_COND_ARG: u32 = 0x1AA;
@@ -96,11 +118,17 @@ struct Command {
     index: u8,
     response: ResponseKind,
     reads_data: bool,
+    /// Reads BLKSIZECNT's count of blocks, then stops the card with an automatic CMD12.
+    multi_block: bool,
 }
 
 impl Command {
     const fn new(index: u8, response: ResponseKind) -> Self {
-        Command { index, response, reads_data: false }
+        Command { index, response, reads_data: false, multi_block: false }
+    }
+
+    const fn reading(index: u8) -> Self {
+        Command { index, response: ResponseKind::Short, reads_data: true, multi_block: false }
     }
 
     fn encode(self) -> u32 {
@@ -112,7 +140,8 @@ impl Command {
             ResponseKind::Long => CMD_RESPONSE_136 | CMD_CRC_CHECK,
         };
         let data = if self.reads_data { CMD_DATA | CMD_READ } else { 0 };
-        (self.index as u32) << 24 | response | data
+        let multi = if self.multi_block { TM_MULTI_BLOCK | TM_BLKCNT_EN | TM_AUTO_CMD12 } else { 0 };
+        (self.index as u32) << 24 | response | data | multi
     }
 }
 
@@ -123,9 +152,12 @@ const SELECT_CARD: Command = Command::new(7, ResponseKind::ShortBusy);
 const SEND_IF_COND: Command = Command::new(8, ResponseKind::Short);
 const SEND_CSD: Command = Command::new(9, ResponseKind::Long);
 const SET_BLOCKLEN: Command = Command::new(16, ResponseKind::Short);
-const READ_SINGLE_BLOCK: Command = Command { index: 17, response: ResponseKind::Short, reads_data: true };
+const SWITCH_FUNC: Command = Command::reading(6);
+const READ_SINGLE_BLOCK: Command = Command::reading(17);
+const READ_MULTIPLE_BLOCK: Command = Command { multi_block: true, ..Command::reading(18) };
 const APP_CMD: Command = Command::new(55, ResponseKind::Short);
-/// Application command: must follow APP_CMD.
+/// Application commands: must follow APP_CMD.
+const SET_BUS_WIDTH: Command = Command::new(6, ResponseKind::Short);
 const SD_SEND_OP_COND: Command = Command::new(41, ResponseKind::ShortNoCheck);
 
 #[derive(Debug)]
@@ -186,6 +218,10 @@ pub struct SdCard {
     /// Capacity in blocks, when the CSD version is understood.
     blocks: Option<u64>,
     base_clock: u32,
+    /// Data lines in use: 1 or 4.
+    bus_width: u8,
+    /// The SD clock asked for.
+    clock_hz: u32,
 }
 
 impl SdCard {
@@ -202,7 +238,7 @@ impl SdCard {
         if base_clock == 0 {
             return Err(SdError::NoClock);
         }
-        let mut card = SdCard { rca: 0, high_capacity: false, blocks: None, base_clock };
+        let mut card = SdCard { rca: 0, high_capacity: false, blocks: None, base_clock, bus_width: 1, clock_hz: 0 };
 
         write(CONTROL0, 0);
         write(CONTROL1, read(CONTROL1) | SRST_HC);
@@ -250,7 +286,44 @@ impl SdCard {
         if !card.high_capacity {
             card.command(SET_BLOCKLEN, BLOCK_SIZE as u32)?;
         }
+        // Optional speed-ups: a card that turns one down still works without it.
+        if card.use_4_bit_bus().is_err() {
+            card.reset_command_line()?;
+        }
+        if card.use_high_speed().is_err() {
+            card.reset_lines()?;
+        }
         Ok(card)
+    }
+
+    /// Switches card and host to 4 data lines. Every SD card supports them.
+    fn use_4_bit_bus(&mut self) -> Result<(), SdError> {
+        self.command(APP_CMD, self.rca)?;
+        self.command(SET_BUS_WIDTH, BUS_WIDTH_4)?;
+        write(CONTROL0, read(CONTROL0) | HCTL_DWIDTH_4);
+        self.bus_width = 4;
+        Ok(())
+    }
+
+    /// Asks the card for high-speed mode; if its status says it switched, runs the clock at
+    /// 50MHz. A card without it reports function 0xF and stays at 25MHz.
+    fn use_high_speed(&mut self) -> Result<(), SdError> {
+        let mut status = [0u8; SWITCH_STATUS_LEN];
+        write(BLKSIZECNT, 1 << 16 | SWITCH_STATUS_LEN as u32);
+        self.command(SWITCH_FUNC, SWITCH_HIGH_SPEED)?;
+        self.read_data(SWITCH_FUNC, &mut status)?;
+        self.wait_for(SWITCH_FUNC, INT_DATA_DONE, "end of switch status", DATA_TIMEOUT)?;
+        // Bits 379:376 of the big-endian status: the function group 1 now uses.
+        if status[16] & 0xF != 1 {
+            return Ok(());
+        }
+        write(CONTROL0, read(CONTROL0) | HCTL_HS_EN);
+        self.set_clock(HIGH_SPEED_HZ)
+    }
+
+    /// Data lines in use (1 or 4), and the SD clock.
+    pub fn bus(&self) -> (u8, u32) {
+        (self.bus_width, self.clock_hz)
     }
 
     pub fn high_capacity(&self) -> bool {
@@ -281,12 +354,32 @@ impl SdCard {
         wait("clock to stabilise", COMMAND_TIMEOUT, || read(CONTROL1) & CLK_STABLE != 0)?;
         write(CONTROL1, read(CONTROL1) | CLK_EN);
         timer::delay_us(10);
+        self.clock_hz = self.base_clock / (2 * divider.max(1));
         Ok(())
     }
 
     fn reset_command_line(&mut self) -> Result<(), SdError> {
         write(CONTROL1, read(CONTROL1) | SRST_CMD);
         wait("command line reset", RESET_TIMEOUT, || read(CONTROL1) & SRST_CMD == 0)
+    }
+
+    fn reset_lines(&mut self) -> Result<(), SdError> {
+        write(CONTROL1, read(CONTROL1) | SRST_CMD | SRST_DATA);
+        wait("line reset", RESET_TIMEOUT, || read(CONTROL1) & (SRST_CMD | SRST_DATA) == 0)
+    }
+
+    /// Reads one block's worth of data (`buf`) once the controller has it.
+    fn read_data(&mut self, cmd: Command, buf: &mut [u8]) -> Result<(), SdError> {
+        self.wait_for(cmd, INT_READ_RDY, "data", DATA_TIMEOUT)?;
+        for word in buf.chunks_exact_mut(4) {
+            word.copy_from_slice(&read(DATA).to_le_bytes());
+        }
+        Ok(())
+    }
+
+    fn address(&self, lba: Lba) -> Result<u32, SdError> {
+        let address = if self.high_capacity { lba.0 } else { lba.0 * BLOCK_SIZE as u64 };
+        u32::try_from(address).map_err(|_| SdError::OutOfRange(lba))
     }
 
     /// Sends `cmd` and returns the response registers.
@@ -325,16 +418,31 @@ impl BlockDevice for SdCard {
     type Error = SdError;
 
     fn read_block(&mut self, lba: Lba, block: &mut Block) -> Result<(), SdError> {
-        let address = if self.high_capacity { lba.0 } else { lba.0 * BLOCK_SIZE as u64 };
-        let address = u32::try_from(address).map_err(|_| SdError::OutOfRange(lba))?;
-
+        let address = self.address(lba)?;
         write(BLKSIZECNT, 1 << 16 | BLOCK_SIZE as u32);
         self.command(READ_SINGLE_BLOCK, address)?;
-        self.wait_for(READ_SINGLE_BLOCK, INT_READ_RDY, "data", DATA_TIMEOUT)?;
-        for word in block.chunks_exact_mut(4) {
-            word.copy_from_slice(&read(DATA).to_le_bytes());
-        }
+        self.read_data(READ_SINGLE_BLOCK, block)?;
         self.wait_for(READ_SINGLE_BLOCK, INT_DATA_DONE, "end of data", DATA_TIMEOUT)
+    }
+
+    fn read_blocks(&mut self, lba: Lba, blocks: &mut [Block]) -> Result<(), SdError> {
+        let mut lba = lba;
+        for chunk in blocks.chunks_mut(MAX_BLOCKS_PER_READ) {
+            if let [block] = chunk {
+                self.read_block(lba, block)?;
+            } else {
+                let address = self.address(lba)?;
+                write(BLKSIZECNT, (chunk.len() as u32) << 16 | BLOCK_SIZE as u32);
+                self.command(READ_MULTIPLE_BLOCK, address)?;
+                for block in chunk.iter_mut() {
+                    self.read_data(READ_MULTIPLE_BLOCK, block)?;
+                }
+                // Includes the automatic CMD12.
+                self.wait_for(READ_MULTIPLE_BLOCK, INT_DATA_DONE, "end of data", DATA_TIMEOUT)?;
+            }
+            lba = lba.offset(chunk.len() as u64);
+        }
+        Ok(())
     }
 }
 
