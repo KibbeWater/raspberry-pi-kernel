@@ -46,7 +46,7 @@ fn block_size(layout: Layout) -> usize {
 }
 
 impl Heap {
-    /// A heap with no memory; every allocation fails until `init`.
+    /// A heap with no memory; every allocation fails until `init` or `extend` gives it some.
     pub const fn empty() -> Self {
         Heap { head: null_mut(), total: 0, used: 0 }
     }
@@ -82,11 +82,7 @@ impl Heap {
     }
 
     /// Allocates a block for `layout`, or returns null if none is free.
-    ///
-    /// # Safety
-    ///
-    /// `init` must have been called.
-    pub unsafe fn alloc(&mut self, layout: Layout) -> *mut u8 {
+    pub fn alloc(&mut self, layout: Layout) -> *mut u8 {
         let size = block_size(layout);
         let align = layout.align().max(BLOCK_ALIGN);
 
@@ -224,12 +220,12 @@ mod tests {
         let mut heap = Heap::empty();
         unsafe { heap.init(start, start + SIZE) };
         let big = layout(SIZE + SIZE / 2, 16);
-        assert!(unsafe { heap.alloc(big) }.is_null());
+        assert!(heap.alloc(big).is_null());
 
         unsafe { heap.extend(start + SIZE, start + 2 * SIZE) };
         assert_eq!(heap.stats().total, 2 * SIZE);
         assert_eq!(heap.stats().largest_free, 2 * SIZE);
-        let block = unsafe { heap.alloc(big) };
+        let block = heap.alloc(big);
         assert_eq!(block as usize, start);
         unsafe { heap.dealloc(block, big) };
         assert_eq!(heap.stats().used, 0);
@@ -239,9 +235,9 @@ mod tests {
     fn respects_alignment_and_merges_freed_neighbours() {
         let (mut heap, _) = heap();
         let total = heap.stats().total;
-        let a = unsafe { heap.alloc(layout(10, 1)) };
-        let b = unsafe { heap.alloc(layout(100, 256)) };
-        let c = unsafe { heap.alloc(layout(3000, 8)) };
+        let a = heap.alloc(layout(10, 1));
+        let b = heap.alloc(layout(100, 256));
+        let c = heap.alloc(layout(3000, 8));
         assert_eq!(b as usize % 256, 0);
         assert!(!a.is_null() && !c.is_null());
         unsafe {
@@ -255,7 +251,7 @@ mod tests {
     #[test]
     fn returns_null_when_full() {
         let (mut heap, _) = heap();
-        assert!(unsafe { heap.alloc(layout(SIZE * 2, 16)) }.is_null());
+        assert!(heap.alloc(layout(SIZE * 2, 16)).is_null());
     }
 
     #[test]
@@ -263,7 +259,7 @@ mod tests {
     fn double_free_panics() {
         let (mut heap, _) = heap();
         let l = layout(64, 16);
-        let p = unsafe { heap.alloc(l) };
+        let p = heap.alloc(l);
         unsafe {
             heap.dealloc(p, l);
             heap.dealloc(p, l);
@@ -293,7 +289,7 @@ mod tests {
         for round in 0..50_000u32 {
             if live.is_empty() || rng.next() % 100 < 55 {
                 let l = layout(1 + (rng.next() % 4096) as usize, 1 << (rng.next() % 9));
-                let p = unsafe { heap.alloc(l) };
+                let p = heap.alloc(l);
                 if p.is_null() {
                     continue; // full
                 }

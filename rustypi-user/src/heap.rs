@@ -26,7 +26,7 @@ static ALLOCATOR: Allocator = Allocator(UnsafeCell::new(Heap::empty()));
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let heap = unsafe { &mut *self.0.get() };
-        let block = unsafe { heap.alloc(layout) };
+        let block = heap.alloc(layout);
         if !block.is_null() {
             return block;
         }
@@ -34,10 +34,10 @@ unsafe impl GlobalAlloc for Allocator {
         // last, so it merges with any free block at the end of the heap.
         let len = (layout.size() + layout.align()).max(GROW_BY).next_multiple_of(PAGE_SIZE as usize);
         match syscall::call(Syscall::Map { len: len as u64 }) {
-            Ok(start) => unsafe {
-                heap.extend(start as usize, start as usize + len);
+            Ok(start) => {
+                unsafe { heap.extend(start as usize, start as usize + len) };
                 heap.alloc(layout)
-            },
+            }
             Err(_) => core::ptr::null_mut(),
         }
     }

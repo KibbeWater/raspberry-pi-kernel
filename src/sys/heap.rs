@@ -10,7 +10,7 @@ struct KernelAllocator(IrqLock<Heap>);
 
 unsafe impl GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        self.0.lock(|heap| unsafe { heap.alloc(layout) })
+        self.0.lock(|heap| heap.alloc(layout))
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
