@@ -1,13 +1,23 @@
 // commands.rs
 //! Commands typed on the host, delivered by the Arduino bridge as `MSG` frames.
-//! Every command answers with an `RSP` frame.
+//! Every command answers with an `RSP` frame, except `help`, which sends one `HELP`
+//! frame per command so the list never outgrows a single line.
 
 use crate::board::STATUS_LED;
 use crate::drivers::gpio::{set_pin_mode, write_pin, Pin, PinMode};
 use crate::{link, sys};
 
-const HELP: &str =
-    "commands: help, led on, led off, led toggle, uptime, info, reboot, shutdown, panic [msg]";
+/// Usage and description of every command, listed by `help`. Keep in sync with
+/// `Shell::handle`.
+const COMMANDS: &[(&str, &str)] = &[
+    ("help", "list commands"),
+    ("led on|off|toggle", "switch the status LED"),
+    ("uptime", "time since reset"),
+    ("info", "board revision and SoC temperature"),
+    ("reboot", "reset the board"),
+    ("shutdown", "halt; pull GPIO3 low to boot again"),
+    ("panic [msg]", "panic, blink the LED and reboot"),
+];
 
 pub struct Shell {
     led: Pin,
@@ -25,7 +35,11 @@ impl Shell {
     pub fn handle(&mut self, text: &str) {
         let text = text.trim();
         match text {
-            "help" => link::send("RSP", HELP),
+            "help" => {
+                for (usage, description) in COMMANDS {
+                    link::send_fmt("HELP", format_args!("{:<18} {}", usage, description));
+                }
+            }
             "led on" => self.set_led(true),
             "led off" => self.set_led(false),
             "led toggle" => self.set_led(!self.led_on),
