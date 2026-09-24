@@ -11,7 +11,6 @@ SECTIONS
     .text :
     {
         KEEP(*(.text.boot))
-        *(.text._start)
         *(.text .text.*)
     }
 

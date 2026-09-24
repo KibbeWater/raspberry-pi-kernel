@@ -24,7 +24,7 @@ _boot:
     b       .L_bss_loop
 .L_bss_done:
 
-    bl      _start
+    bl      kernel_main
 
 .L_park:
     wfe

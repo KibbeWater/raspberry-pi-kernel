@@ -1,0 +1,8 @@
+// board.rs
+//! Constants for the board this kernel runs on (Raspberry Pi 3B+, BCM2837).
+
+/// Start of the peripheral MMIO window as seen from the ARM cores.
+pub const PERIPHERAL_BASE: usize = 0x3F00_0000;
+
+/// GPIO pin of the external status LED, blinked on panic.
+pub const STATUS_LED: u8 = 21;

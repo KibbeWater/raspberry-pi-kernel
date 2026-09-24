@@ -1,5 +1,5 @@
 pub mod gpio;
-pub mod time;
-pub mod uart;
-pub mod link;
 pub mod mailbox;
+pub mod power;
+pub mod timer;
+pub mod uart;

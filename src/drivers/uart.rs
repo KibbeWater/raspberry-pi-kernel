@@ -1,13 +1,14 @@
 // UART.rs
 use core::ptr::{read_volatile, write_volatile};
+use crate::board::PERIPHERAL_BASE;
 use crate::drivers::gpio::{Pin, PinMode, PullMode, set_pin_mode, set_pin_pull};
 
-/// Base address for UART0 on the Raspberry Pi 3B+.
-const UART0_BASE: usize = 0x3F201000;
+const UART0_BASE: usize = PERIPHERAL_BASE + 0x20_1000;
 
 /// Bit flags for the UART Flag Register.
 const UART_FR_TXFF: u32 = 1 << 5; // Transmit FIFO full
 const UART_FR_RXFE: u32 = 1 << 4; // Receive FIFO empty
+const UART_FR_BUSY: u32 = 1 << 3; // Still transmitting
 
 /// Error bits in the Data Register that accompany a damaged received byte:
 /// framing (8), parity (9), break (10) and overrun (11).
@@ -127,20 +128,16 @@ impl Uart {
         write_reg(&mut uart.dr, c as u32);
     }
 
-    /// Tries to receive one byte from UART.
-    ///
-    /// Returns `Some(u8)` if data is available, or `None` if the receive FIFO is empty.
-    pub fn receive() -> Option<u8> {
+    /// Waits until every queued byte has left the transmitter.
+    pub fn flush() {
         let uart = uart_regs();
-        if (read_reg(&uart.fr) & UART_FR_RXFE) != 0 {
-            None
-        } else {
-            Some((read_reg(&uart.dr) & 0xFF) as u8)
-        }
+        while (read_reg(&uart.fr) & UART_FR_BUSY) != 0 {}
     }
 
-    /// Like `receive`, but returns `Err(byte)` when the UART flagged the byte as
-    /// damaged (framing, parity, break or overrun error).
+    /// Tries to receive one byte from UART.
+    ///
+    /// Returns `None` if the receive FIFO is empty, or `Some(Err(byte))` when the UART
+    /// flagged the byte as damaged (framing, parity, break or overrun error).
     pub fn receive_checked() -> Option<Result<u8, u8>> {
         let uart = uart_regs();
         if (read_reg(&uart.fr) & UART_FR_RXFE) != 0 {
@@ -155,17 +152,6 @@ impl Uart {
     pub fn send_string(s: &str) {
         for byte in s.bytes() {
             Self::send(byte);
-        }
-    }
-
-    /// (Optional) Blocking version of receive.
-    ///
-    /// Waits until a byte is received and then returns it.
-    pub fn receive_blocking() -> u8 {
-        loop {
-            if let Some(byte) = Self::receive() {
-                return byte;
-            }
         }
     }
 }

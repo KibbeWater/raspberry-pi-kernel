@@ -9,11 +9,12 @@
 //!
 //! `HH` is the XOR of every byte between `$` and `*`, as two uppercase hex digits.
 //! Lines that do not start with `$` are plain console text; the Arduino passes them
-//! straight through to the host, so `Uart::send_string` logging keeps working.
+//! straight through to the host, so `println!` logging keeps working.
 //!
 //! A `$` always starts a new frame, so line noise before a frame can't swallow it.
 //! Payloads therefore must not contain `$`.
 
+use core::fmt::{self, Write};
 use crate::drivers::uart::Uart;
 
 /// Link speed. The Uno receives with SoftwareSerial, which is unreliable above this.
@@ -158,44 +159,50 @@ fn hex_byte(hi: u8, lo: u8) -> Option<u8> {
     Some(nibble(hi)? << 4 | nibble(lo)?)
 }
 
-/// Sends one frame. The payload is sent as-is, so it must not contain `\n`.
+/// Sends one frame. The payload must not contain `$` or `\n`.
 pub fn send(kind: &str, payload: &str) {
-    send_parts(kind, &[payload]);
+    send_fmt(kind, format_args!("{}", payload));
 }
 
-/// Sends one frame whose payload is the concatenation of `parts`, so callers can
-/// build messages without an allocator.
-pub fn send_parts(kind: &str, parts: &[&str]) {
+/// Sends one frame with a formatted payload, without needing an allocator:
+///
+/// ```ignore
+/// link::send_fmt("RSP", format_args!("uptime {}s", secs));
+/// ```
+pub fn send_fmt(kind: &str, payload: fmt::Arguments) {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
-    let mut sum = checksum(kind.as_bytes());
     Uart::send(b'$');
     Uart::send_string(kind);
-    if parts.iter().any(|p| !p.is_empty()) {
-        sum ^= b',';
-        Uart::send(b',');
-        for part in parts {
-            sum ^= checksum(part.as_bytes());
-            Uart::send_string(part);
-        }
-    }
+    let mut frame = FrameWriter { sum: checksum(kind.as_bytes()), has_payload: false };
+    // FrameWriter never returns an error.
+    let _ = frame.write_fmt(payload);
+    let sum = frame.sum;
     Uart::send(b'*');
     Uart::send(HEX[(sum >> 4) as usize]);
     Uart::send(HEX[(sum & 0xF) as usize]);
     Uart::send(b'\n');
 }
 
-/// Formats `n` as decimal into `buf`, returning the used slice.
-pub fn fmt_u32(mut n: u32, buf: &mut [u8; 10]) -> &str {
-    let mut i = buf.len();
-    loop {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
+/// Streams a payload to the UART while accumulating the frame checksum. The `,`
+/// separator is only sent once the payload turns out to be non-empty.
+struct FrameWriter {
+    sum: u8,
+    has_payload: bool,
+}
+
+impl Write for FrameWriter {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        if s.is_empty() {
+            return Ok(());
         }
+        if !self.has_payload {
+            self.has_payload = true;
+            self.sum ^= b',';
+            Uart::send(b',');
+        }
+        self.sum ^= checksum(s.as_bytes());
+        Uart::send_string(s);
+        Ok(())
     }
-    // Only ASCII digits were written.
-    core::str::from_utf8(&buf[i..]).unwrap_or("?")
 }

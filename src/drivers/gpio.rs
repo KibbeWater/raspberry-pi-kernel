@@ -1,8 +1,8 @@
 // gpio.rs
 use core::ptr::{read_volatile, write_volatile};
+use crate::board::PERIPHERAL_BASE;
 
-/// Base address for the Raspberry Pi 3 GPIO registers.
-const GPIO_BASE: usize = 0x3F200000;
+const GPIO_BASE: usize = PERIPHERAL_BASE + 0x20_0000;
 
 /// Represents the memory‑mapped registers for the GPIO peripheral.
 ///
@@ -60,6 +60,7 @@ impl Pin {
 }
 
 /// The different function modes a GPIO pin can have.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PinMode {
     Input = 0,
@@ -131,6 +132,7 @@ pub fn write_pin(pin: Pin, state: bool) {
 }
 
 /// The pull‑up/down mode for a GPIO pin.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PullMode {
     Off = 0,
