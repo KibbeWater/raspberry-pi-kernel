@@ -159,8 +159,8 @@ fn hex_byte(hi: u8, lo: u8) -> Option<u8> {
     Some(nibble(hi)? << 4 | nibble(lo)?)
 }
 
-/// Writes one frame with a formatted payload to `out`, without needing an allocator. The
-/// payload must not contain `$` or `\n`.
+/// Writes one frame with a formatted payload to `out`, without needing an allocator. A `$`,
+/// `\r` or `\n` in the payload would break the framing, so each is sent as `?` instead.
 pub fn write_frame(out: &mut impl Write, kind: &str, payload: fmt::Arguments) -> fmt::Result {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
@@ -193,10 +193,24 @@ impl<W: Write> Write for FrameWriter<'_, W> {
             self.sum ^= b',';
             self.out.write_char(',')?;
         }
-        self.sum ^= checksum(s.as_bytes());
-        self.out.write_str(s)
+        for piece in s.split_inclusive(FRAME_BREAKING) {
+            let (text, replaced) = match piece.strip_suffix(FRAME_BREAKING) {
+                Some(text) => (text, true),
+                None => (piece, false),
+            };
+            self.sum ^= checksum(text.as_bytes());
+            self.out.write_str(text)?;
+            if replaced {
+                self.sum ^= b'?';
+                self.out.write_char('?')?;
+            }
+        }
+        Ok(())
     }
 }
+
+/// Characters that can't appear inside a frame.
+const FRAME_BREAKING: [char; 3] = ['$', '\r', '\n'];
 
 #[cfg(test)]
 mod tests {
@@ -236,6 +250,13 @@ mod tests {
         let mut out = String::new();
         write_frame(&mut out, "PONG", format_args!("{}{}", "", "")).unwrap();
         assert_eq!(out, "$PONG*16\n");
+    }
+
+    #[test]
+    fn frame_breaking_characters_are_replaced() {
+        let line = frame("RSP", "cost $5\r\nnext");
+        assert_eq!(line, frame("RSP", "cost ?5??next"));
+        assert_eq!(line.matches('\n').count(), 1);
     }
 
     #[test]

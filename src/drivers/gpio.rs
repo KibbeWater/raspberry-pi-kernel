@@ -21,8 +21,9 @@ struct GpioRegisters {
     _reserved2: [u32; 25],
     /// GPIO Pin Pull‑up/down Register (GPPUD) at offset 0x94.
     gppud: u32,
-    /// GPIO Pin Pull‑up/down Clock Register 0 (GPPUDCLK0) at offset 0x98.
-    gppudclk0: u32,
+    /// GPIO Pin Pull‑up/down Clock Registers (GPPUDCLK0, GPPUDCLK1) at offset 0x98, one
+    /// bit per pin.
+    gppudclk: [u32; 2],
 }
 
 /// Returns a mutable reference to the GPIO registers.
@@ -152,9 +153,9 @@ fn delay(count: u32) {
 /// The sequence follows the BCM2835 recommendation:
 /// 1. Write the desired pull mode (0 for Off, 1 for Down, 2 for Up) to GPPUD.
 /// 2. Wait (~150 cycles).
-/// 3. Write to GPPUDCLK0 the bit corresponding to the pin.
+/// 3. Write to GPPUDCLK0/1 the bit corresponding to the pin.
 /// 4. Wait (~150 cycles).
-/// 5. Clear GPPUDCLK0.
+/// 5. Clear GPPUDCLK0/1.
 pub fn set_pin_pull(pin: Pin, mode: PullMode) {
     let gpio = gpio_instance();
 
@@ -162,12 +163,13 @@ pub fn set_pin_pull(pin: Pin, mode: PullMode) {
         write_volatile(&mut gpio.gppud, mode as u32);
     }
     delay(150);
+    let reg_index = pin.number() as usize / 32;
     let bit = 1 << (pin.number() as usize % 32);
     unsafe {
-        write_volatile(&mut gpio.gppudclk0, bit);
+        write_volatile(&mut gpio.gppudclk[reg_index], bit);
     }
     delay(150);
     unsafe {
-        write_volatile(&mut gpio.gppudclk0, 0);
+        write_volatile(&mut gpio.gppudclk[reg_index], 0);
     }
 }

@@ -6,10 +6,14 @@
 
 extern crate alloc;
 
+pub mod block;
 pub mod console;
+pub mod fat;
 pub mod font;
 pub mod graphics;
 pub mod heap;
 pub mod link;
 pub mod mailbox;
+pub mod mbr;
+pub mod sd;
 pub mod session;

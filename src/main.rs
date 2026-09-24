@@ -33,6 +33,10 @@ pub extern "C" fn kernel_main() -> ! {
         println!("no screen: {}", error);
     }
     println!("Hello from RPi! {} {} at EL{}", NAME, sys::VERSION, sys::exception_level());
+    match sys::fs::mount() {
+        Ok(info) => println!("sd: {:?} volume '{}' mounted", info.fat_type, info.label),
+        Err(error) => println!("sd: {}", error),
+    }
     link::send("HELLO", NAME);
 
     let mut shell = Shell::new();

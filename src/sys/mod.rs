@@ -4,6 +4,7 @@
 //! Code outside `drivers` should go through here rather than poking hardware.
 
 pub mod console;
+pub mod fs;
 pub mod print;
 mod heap;
 mod panic;

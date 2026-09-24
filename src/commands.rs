@@ -7,7 +7,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use crate::board::STATUS_LED;
 use crate::drivers::gpio::{set_pin_mode, write_pin, Pin, PinMode};
+use rustypi_core::mbr::Volume;
 use rustypi_core::session::{LineKind, Reply};
+use crate::sys::fs::EntryKind;
 use crate::sys;
 
 /// Usage and description of every command, listed by `help`. Keep in sync with
@@ -20,6 +22,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("info", "board, firmware, memory, temperature, EL and MMU"),
     ("heap [test]", "heap usage, or run an allocator stress test"),
     ("screen [test|redraw]", "screen info, colour bars, or redraw the text"),
+    ("sd", "sd card and filesystem info"),
+    ("ls [path]", "list a directory on the sd card"),
+    ("cat <path>", "show the start of a text file"),
     ("reboot", "reset the board"),
     ("shutdown", "halt; pull GPIO3 low to boot again"),
     ("panic [msg]", "panic, blink the LED and reboot"),
@@ -87,6 +92,10 @@ impl Shell {
                 reply.rsp(if drawn { "bars from left: red, green, blue, white" } else { "no screen" });
             }
             "screen redraw" => reply.rsp(if sys::console::redraw() { "redrawn" } else { "no screen" }),
+            "sd" => sd(reply),
+            "ls" => ls("/", reply),
+            _ if text.starts_with("ls ") => ls(text["ls ".len()..].trim(), reply),
+            _ if text.starts_with("cat ") => cat(text["cat ".len()..].trim(), reply),
             "reboot" => {
                 reply.rsp("rebooting");
                 return Some(Action::Reboot);
@@ -116,6 +125,70 @@ impl Shell {
         self.led_on = on;
         write_pin(self.led, on);
         reply.rsp(if on { "led is on" } else { "led is off" });
+    }
+}
+
+/// Most lines `ls` and `cat` reply with, so a reply stays a reasonable size.
+const MAX_LISTING_LINES: usize = 40;
+
+fn sd(reply: &mut Reply) {
+    let info = match sys::fs::info() {
+        Ok(info) => info,
+        Err(error) => return reply.line(LineKind::Rsp, format_args!("{}", error)),
+    };
+    let location = match info.volume {
+        Volume::Partition { index, partition } => {
+            alloc::format!("partition {} at block {}", index + 1, partition.start.0)
+        }
+        Volume::WholeDisk => "whole card".into(),
+    };
+    reply.line(LineKind::Rsp, format_args!(
+        "{:?} '{}', {}, {} KB clusters",
+        info.fat_type,
+        info.label,
+        location,
+        info.cluster_size / 1024,
+    ));
+    let kind = if info.high_capacity { "SDHC/SDXC" } else { "SDSC" };
+    match info.card_blocks {
+        Some(blocks) => reply.line(LineKind::Rsp, format_args!("card: {}, {} MB", kind, blocks / 2048)),
+        None => reply.line(LineKind::Rsp, format_args!("card: {}", kind)),
+    }
+}
+
+fn ls(path: &str, reply: &mut Reply) {
+    let entries = match sys::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) => return reply.line(LineKind::Rsp, format_args!("{}: {}", path, error)),
+    };
+    if entries.is_empty() {
+        reply.rsp("(empty)");
+    }
+    for entry in entries.iter().take(MAX_LISTING_LINES) {
+        match entry.kind {
+            EntryKind::Directory => reply.line(LineKind::Rsp, format_args!("{:>9}  {}/", "", entry.name)),
+            EntryKind::File => reply.line(LineKind::Rsp, format_args!("{:>9}  {}", entry.size, entry.name)),
+        }
+    }
+    if entries.len() > MAX_LISTING_LINES {
+        reply.line(LineKind::Rsp, format_args!("... {} more", entries.len() - MAX_LISTING_LINES));
+    }
+}
+
+fn cat(path: &str, reply: &mut Reply) {
+    let data = match sys::fs::read_file(path) {
+        Ok(data) => data,
+        Err(error) => return reply.line(LineKind::Rsp, format_args!("{}: {}", path, error)),
+    };
+    let Ok(text) = core::str::from_utf8(&data) else {
+        return reply.line(LineKind::Rsp, format_args!("binary file, {} bytes", data.len()));
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    for line in lines.iter().take(MAX_LISTING_LINES) {
+        reply.rsp(line);
+    }
+    if lines.len() > MAX_LISTING_LINES {
+        reply.line(LineKind::Rsp, format_args!("... {} more lines", lines.len() - MAX_LISTING_LINES));
     }
 }
 

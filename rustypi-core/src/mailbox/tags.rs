@@ -62,6 +62,34 @@ impl Tag for GetTemperature {
     type Response = Temperature;
 }
 
+/// A clock in the SoC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct ClockId(pub u32);
+
+unsafe impl Words for ClockId {}
+
+impl ClockId {
+    /// The EMMC controller's base clock, which the SD card clock is divided from.
+    pub const EMMC: ClockId = ClockId(1);
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct ClockRate {
+    pub id: ClockId,
+    pub hz: u32,
+}
+
+unsafe impl Words for ClockRate {}
+
+pub struct GetClockRate;
+impl Tag for GetClockRate {
+    const ID: u32 = 0x0003_0002;
+    type Request = ClockId;
+    type Response = ClockRate;
+}
+
 // Framebuffer. The set tags respond with what the firmware actually applied, which can
 // differ from the request.
 
