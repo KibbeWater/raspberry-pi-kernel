@@ -193,8 +193,8 @@ impl Uart {
 
 const RX_QUEUE_LEN: usize = 1024;
 
-/// Single-producer (IRQ handler), single-consumer (main loop) ring buffer of data
-/// register values: the byte plus its error bits. Uses only atomic loads and stores.
+/// Single-producer (IRQ handler), single-consumer (the link task) ring buffer of data
+/// register values: the byte plus its error bits.
 struct RxQueue {
     entries: UnsafeCell<[u16; RX_QUEUE_LEN]>,
     /// Next slot to write; only the producer stores it.
@@ -229,8 +229,8 @@ impl RxQueue {
     }
 
     fn pop(&self) -> Option<u16> {
-        if self.overflowed.load(Ordering::Relaxed) {
-            self.overflowed.store(false, Ordering::Relaxed);
+        // Swapped, so an overflow the IRQ handler flags meanwhile isn't lost.
+        if self.overflowed.swap(false, Ordering::Relaxed) {
             return Some(UART_DR_ERRORS as u16);
         }
         let tail = self.tail.load(Ordering::Relaxed);

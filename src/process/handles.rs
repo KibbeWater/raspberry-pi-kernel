@@ -10,7 +10,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 use rustypi_abi::layout::MAX_ARGS;
-use rustypi_abi::{DirEntry, Errno, ExitStatus, INPUT, MAX_HANDLES, MAX_PATH, MAX_READ, OUTPUT};
+use rustypi_abi::{DirEntry, Errno, ExitStatus, INPUT, MAX_HANDLES, MAX_PATH, MAX_READ, MAX_WRITE, OUTPUT};
 use rustypi_core::elf;
 use rustypi_core::sched::TaskId;
 use rustypi_core::fat::{self, EntryKind, FatError};
@@ -161,8 +161,8 @@ pub(super) fn write(handle: u64, ptr: u64, len: u64) -> Result<u64, Errno> {
         return write_pipe(&pipe, ptr, len);
     }
     // Copied in before taking the lock again to add it.
-    let mut buf = [0; MAX_READ];
-    let bytes = copy_from_user(ptr, &mut buf[..len.min(MAX_READ as u64) as usize])?;
+    let mut buf = [0; MAX_WRITE];
+    let bytes = copy_from_user(ptr, &mut buf[..len.min(MAX_WRITE as u64) as usize])?;
     with_running(|running| match running.handles.get_mut(handle)? {
         Open::NewFile { data, .. } => {
             data.extend(bytes)?;
@@ -268,7 +268,7 @@ pub(super) fn draw(handle: u64, x: u64, y: u64, width: u64, height: u64, pixels:
     let mut row = vec![0u8; visible_width * 4];
     let mut words = vec![0u32; visible_width];
     for r in 0..visible_height {
-        let at = pixels.checked_add(r as u64 * row_bytes).ok_or(Errno::Fault)?;
+        let at = (r as u64).checked_mul(row_bytes).and_then(|offset| pixels.checked_add(offset)).ok_or(Errno::Fault)?;
         copy_from_user(at, &mut row)?;
         for (word, bytes) in words.iter_mut().zip(row.chunks_exact(4)) {
             *word = u32::from_le_bytes(bytes.try_into().unwrap());
