@@ -158,6 +158,31 @@ pub fn wait_until(event: Event, ready: impl Fn() -> bool) {
     }
 }
 
+/// The running task. Before `init`, the boot code counts as task 0, which it becomes.
+pub fn current() -> TaskId {
+    SCHEDULER.lock(|scheduler| scheduler.as_ref().map_or(TaskId(0), |s| s.queue.current()))
+}
+
+/// Blocks the running task until `wake` is called with its id. Call with IRQs masked, after
+/// arranging for someone to wake it, so the wake can't come before the block.
+pub fn block() {
+    SCHEDULER.lock(|scheduler| {
+        if let Some(scheduler) = scheduler {
+            scheduler.queue.block_current();
+        }
+    });
+    yield_now();
+}
+
+/// Makes a task blocked in `block` ready to run.
+pub fn wake(id: TaskId) {
+    SCHEDULER.lock(|scheduler| {
+        if let Some(scheduler) = scheduler {
+            scheduler.queue.wake(id);
+        }
+    });
+}
+
 /// Waits for task `id` to finish (or be gone already).
 pub fn join(id: TaskId) {
     loop {

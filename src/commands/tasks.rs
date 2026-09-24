@@ -6,17 +6,20 @@ use core::time::Duration;
 use rustypi_core::session::{LineKind, Reply};
 use super::{Command, Outcome, Shell};
 use crate::sched;
-use crate::synchronization::{interface::Mutex, IrqLock};
+use crate::synchronization::{interface::Mutex as _, IrqLock, Mutex};
 use crate::sys;
 
 pub const COMMANDS: &[Command] = &[
-    Command { name: "tasks", args: "[test]", description: "list tasks, or test preemption", run: tasks },
+    Command { name: "tasks", args: "[test]", description: "list tasks, or test preemption and Mutex", run: tasks },
 ];
 
 fn tasks<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     match args {
         "" => list(reply),
-        "test" => preemption_test(reply),
+        "test" => {
+            preemption_test(reply);
+            mutex_test(reply);
+        }
         _ => return Outcome::Usage,
     }
     Outcome::Done
@@ -109,5 +112,39 @@ fn preemption_test(reply: &mut Reply) {
         results[0].preemptions,
         results[1].preemptions,
         results[2].preemptions,
+    ));
+}
+
+const INCREMENTS: u64 = 50;
+
+static COUNTER: Mutex<u64> = Mutex::new(0);
+
+/// Workers increment a shared counter, yielding while they hold the lock, so the others find
+/// it held and must block. With a working Mutex no increment is lost.
+fn mutex_test(reply: &mut Reply) {
+    COUNTER.lock(|count| *count = 0);
+    let ids: Vec<_> = (0..WORKERS)
+        .map(|_| {
+            sched::spawn("counter", || {
+                for _ in 0..INCREMENTS {
+                    COUNTER.lock(|count| {
+                        let seen = *count;
+                        sched::yield_now();
+                        *count = seen + 1;
+                    });
+                }
+            })
+        })
+        .collect();
+    for id in ids {
+        sched::join(id);
+    }
+    let count = COUNTER.lock(|count| *count);
+    let expected = WORKERS as u64 * INCREMENTS;
+    reply.line(LineKind::Rsp, format_args!(
+        "mutex test {}: {}/{} increments",
+        if count == expected { "passed" } else { "FAILED" },
+        count,
+        expected,
     ));
 }

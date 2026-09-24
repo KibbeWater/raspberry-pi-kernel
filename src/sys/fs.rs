@@ -8,7 +8,7 @@ use rustypi_core::block::{BlockDevice, Lba, BLOCK_SIZE};
 use rustypi_core::fat::{Fat, FatError, FatType};
 use rustypi_core::mbr::{self, Volume};
 use crate::drivers::sdcard::{SdCard, SdError};
-use crate::synchronization::TryLock;
+use crate::synchronization::{interface::Mutex as _, Mutex};
 
 pub use rustypi_core::fat::{DirEntry, EntryKind};
 
@@ -19,8 +19,6 @@ pub enum FsError {
     NoFatVolume,
     Fat(FatError<SdError>),
     NotMounted,
-    /// The filesystem is in use by whatever this call interrupted.
-    Busy,
 }
 
 impl From<SdError> for FsError {
@@ -42,7 +40,6 @@ impl fmt::Display for FsError {
             FsError::NoFatVolume => write!(f, "no FAT volume on the card"),
             FsError::Fat(error) => write!(f, "{}", error),
             FsError::NotMounted => write!(f, "no filesystem mounted"),
-            FsError::Busy => write!(f, "filesystem busy"),
         }
     }
 }
@@ -63,8 +60,8 @@ struct Mounted {
     info: MountInfo,
 }
 
-/// Only used from the main loop; `try_lock` keeps SD transfers from masking IRQs.
-static FS: TryLock<Option<Mounted>> = TryLock::new(None);
+/// A sleeping lock: reading a big file takes a while, and other tasks keep running meanwhile.
+static FS: Mutex<Option<Mounted>> = Mutex::new(None);
 
 /// Initialises the SD card and mounts its FAT volume.
 pub fn mount() -> Result<MountInfo, FsError> {
@@ -83,13 +80,12 @@ pub fn mount() -> Result<MountInfo, FsError> {
         card_blocks,
     };
     let mounted = Mounted { fat, info: info.clone() };
-    FS.try_lock(|fs| *fs = Some(mounted)).ok_or(FsError::Busy)?;
+    FS.lock(|fs| *fs = Some(mounted));
     Ok(info)
 }
 
 fn with_fs<R>(f: impl FnOnce(&mut Mounted) -> Result<R, FsError>) -> Result<R, FsError> {
-    FS.try_lock(|fs| fs.as_mut().map_or(Err(FsError::NotMounted), f))
-        .unwrap_or(Err(FsError::Busy))
+    FS.lock(|fs| fs.as_mut().map_or(Err(FsError::NotMounted), f))
 }
 
 pub fn info() -> Result<MountInfo, FsError> {

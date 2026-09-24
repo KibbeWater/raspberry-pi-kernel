@@ -20,6 +20,8 @@ pub enum State {
     /// Until the given microsecond timestamp.
     Sleeping { until_us: u64 },
     Waiting(Event),
+    /// Until another task wakes it by id, like a mutex handing it the lock.
+    Blocked,
     /// Returned from its entry point; waiting to be reaped.
     Finished,
 }
@@ -31,6 +33,7 @@ impl State {
             State::Ready => "ready",
             State::Sleeping { .. } => "sleeping",
             State::Waiting(_) => "waiting",
+            State::Blocked => "blocked",
             State::Finished => "finished",
         }
     }
@@ -113,6 +116,22 @@ impl RunQueue {
     /// The current task stops being runnable until `event` is notified.
     pub fn wait_current(&mut self, event: Event) {
         self.set_current(State::Waiting(event));
+    }
+
+    /// The current task stops being runnable until `wake` is called with its id.
+    pub fn block_current(&mut self) {
+        self.set_current(State::Blocked);
+    }
+
+    /// Makes a blocked task ready. Returns whether it was blocked.
+    pub fn wake(&mut self, id: TaskId) -> bool {
+        match self.entry_mut(id) {
+            Some(entry) if entry.state == State::Blocked => {
+                entry.state = State::Ready;
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn finish_current(&mut self) {
@@ -269,6 +288,17 @@ mod tests {
         assert_eq!(order(&mut queue, 3), [2, 3, 2]);
         assert!(!queue.notify(Event(2)));
         assert!(queue.notify(INPUT));
+        assert_eq!(order(&mut queue, 2), [3, 0]);
+    }
+
+    #[test]
+    fn blocked_tasks_run_again_only_when_woken_by_id() {
+        let mut queue = queue();
+        queue.block_current();
+        assert!(!queue.notify(INPUT));
+        assert_eq!(order(&mut queue, 3), [2, 3, 2]);
+        assert!(!queue.wake(TaskId(3))); // not blocked
+        assert!(queue.wake(TaskId(0)));
         assert_eq!(order(&mut queue, 2), [3, 0]);
     }
 

@@ -13,6 +13,7 @@ pub mod font;
 pub mod graphics;
 pub mod heap;
 pub mod link;
+pub mod lock;
 pub mod mailbox;
 pub mod mbr;
 pub mod sched;
