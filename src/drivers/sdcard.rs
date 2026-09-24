@@ -180,6 +180,7 @@ const SET_BLOCKLEN: Command = Command::new(16, ResponseKind::Short);
 const SWITCH_FUNC: Command = Command::reading(6);
 const READ_SINGLE_BLOCK: Command = Command::reading(17);
 const READ_MULTIPLE_BLOCK: Command = Command { multi_block: true, ..Command::reading(18) };
+const STOP_TRANSMISSION: Command = Command::new(12, ResponseKind::ShortBusy);
 const WRITE_BLOCK: Command = Command::writing(24);
 const WRITE_MULTIPLE_BLOCK: Command = Command { multi_block: true, ..Command::writing(25) };
 const APP_CMD: Command = Command::new(55, ResponseKind::Short);
@@ -464,10 +465,22 @@ impl SdCard {
     }
 }
 
-impl BlockDevice for SdCard {
-    type Error = SdError;
+impl SdCard {
+    /// Runs a transfer. After an error the controller wants its lines reset before the next
+    /// command, and the card may still be mid-transfer, so it is told to stop too.
+    fn transfer(&mut self, f: impl FnOnce(&mut Self) -> Result<(), SdError>) -> Result<(), SdError> {
+        let result = f(self);
+        if result.is_err() {
+            // Best effort: the card may already have stopped, and the error to report is the
+            // first one.
+            let _ = self.reset_lines();
+            let _ = self.command(STOP_TRANSMISSION, 0);
+            let _ = self.reset_lines();
+        }
+        result
+    }
 
-    fn read_block(&mut self, lba: Lba, block: &mut Block) -> Result<(), SdError> {
+    fn read_one(&mut self, lba: Lba, block: &mut Block) -> Result<(), SdError> {
         let address = self.address(lba)?;
         write(BLKSIZECNT, 1 << 16 | BLOCK_SIZE as u32);
         self.command(READ_SINGLE_BLOCK, address)?;
@@ -475,11 +488,11 @@ impl BlockDevice for SdCard {
         self.wait_for(READ_SINGLE_BLOCK, INT_DATA_DONE, "end of data", DATA_TIMEOUT)
     }
 
-    fn read_blocks(&mut self, lba: Lba, blocks: &mut [Block]) -> Result<(), SdError> {
+    fn read_many(&mut self, lba: Lba, blocks: &mut [Block]) -> Result<(), SdError> {
         let mut lba = lba;
         for chunk in blocks.chunks_mut(MAX_BLOCKS_PER_TRANSFER) {
             if let [block] = chunk {
-                self.read_block(lba, block)?;
+                self.read_one(lba, block)?;
             } else {
                 let address = self.address(lba)?;
                 write(BLKSIZECNT, (chunk.len() as u32) << 16 | BLOCK_SIZE as u32);
@@ -494,10 +507,8 @@ impl BlockDevice for SdCard {
         }
         Ok(())
     }
-}
 
-impl WritableBlockDevice for SdCard {
-    fn write_block(&mut self, lba: Lba, block: &Block) -> Result<(), SdError> {
+    fn write_one(&mut self, lba: Lba, block: &Block) -> Result<(), SdError> {
         let address = self.address(lba)?;
         write(BLKSIZECNT, 1 << 16 | BLOCK_SIZE as u32);
         self.command(WRITE_BLOCK, address)?;
@@ -506,11 +517,11 @@ impl WritableBlockDevice for SdCard {
         self.wait_until_programmed()
     }
 
-    fn write_blocks(&mut self, lba: Lba, blocks: &[Block]) -> Result<(), SdError> {
+    fn write_many(&mut self, lba: Lba, blocks: &[Block]) -> Result<(), SdError> {
         let mut lba = lba;
         for chunk in blocks.chunks(MAX_BLOCKS_PER_TRANSFER) {
             if let [block] = chunk {
-                self.write_block(lba, block)?;
+                self.write_one(lba, block)?;
             } else {
                 let address = self.address(lba)?;
                 write(BLKSIZECNT, (chunk.len() as u32) << 16 | BLOCK_SIZE as u32);
@@ -525,6 +536,28 @@ impl WritableBlockDevice for SdCard {
             lba = lba.offset(chunk.len() as u64);
         }
         Ok(())
+    }
+}
+
+impl BlockDevice for SdCard {
+    type Error = SdError;
+
+    fn read_block(&mut self, lba: Lba, block: &mut Block) -> Result<(), SdError> {
+        self.transfer(|card| card.read_one(lba, block))
+    }
+
+    fn read_blocks(&mut self, lba: Lba, blocks: &mut [Block]) -> Result<(), SdError> {
+        self.transfer(|card| card.read_many(lba, blocks))
+    }
+}
+
+impl WritableBlockDevice for SdCard {
+    fn write_block(&mut self, lba: Lba, block: &Block) -> Result<(), SdError> {
+        self.transfer(|card| card.write_one(lba, block))
+    }
+
+    fn write_blocks(&mut self, lba: Lba, blocks: &[Block]) -> Result<(), SdError> {
+        self.transfer(|card| card.write_many(lba, blocks))
     }
 }
 
