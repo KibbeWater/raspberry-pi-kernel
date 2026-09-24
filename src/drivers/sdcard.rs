@@ -95,7 +95,7 @@ const PROGRAMMING_TIMEOUT: u64 = 1_000_000;
 
 /// CMD8 argument: 2.7-3.6V, and a check pattern the card echoes.
 const IF_COND_ARG: u32 = 0x1AA;
-/// ACMD41: the voltage window 3.2-3.4V, plus "host supports high capacity".
+/// ACMD41: the voltage window 2.7-3.6V, plus "host supports high capacity".
 const OCR_VOLTAGE: u32 = 0x00FF_8000;
 const OCR_HCS: u32 = 1 << 30;
 const OCR_READY: u32 = 1 << 31;

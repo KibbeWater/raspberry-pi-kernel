@@ -67,7 +67,7 @@ impl<T> interface::Mutex for IrqLock<T> {
 
 /// A lock that never waits and never masks IRQs: if it is already held, `try_lock` gives up
 /// and returns `None`. For data that is slow to update, where blocking interrupts would lose
-/// UART bytes, like the screen or the SD card.
+/// UART bytes, like the screen, the mailbox or console output.
 ///
 /// Holding it disables preemption, so no other task can find it held. Only an interrupt or
 /// exception handler that arrived while the holder was running can, and that one always

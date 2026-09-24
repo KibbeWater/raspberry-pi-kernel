@@ -2,8 +2,9 @@
 //! What a program has open, by handle: files (to read, or new ones to write), directories,
 //! the children it started, pipe ends and the screen. And the system calls on them.
 //!
-//! The filesystem is read-only, and files are small, so opening a file reads it whole (up to
-//! `MAX_FILE`); reads then come from memory. Opening a directory lists it.
+//! Files are small, so opening a file reads it whole (up to `MAX_FILE`) and reads then come
+//! from memory; a new file collects what is written and goes to the card on close. Opening a
+//! directory lists it.
 
 use alloc::string::String;
 use alloc::vec;

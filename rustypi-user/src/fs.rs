@@ -55,6 +55,7 @@ pub fn read_to_string(path: &str) -> Result<String, Errno> {
 
 /// A file being written. It reaches the card all at once when committed (or dropped, which
 /// can't report errors), replacing any file there; until then the old one stays as it was.
+/// `exit`, which runs no destructors, throws an uncommitted one away.
 pub struct NewFile(Handle);
 
 impl NewFile {

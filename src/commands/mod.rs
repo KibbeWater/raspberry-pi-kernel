@@ -5,9 +5,10 @@
 //! both read those tables, so the help text can't drift from what is actually accepted.
 //! Handlers write their answer into a `session::Reply`.
 //!
-//! A line that isn't a command but names a program in `/bin` runs it, like `run`. While a
-//! program runs in the foreground, lines go to it as input instead; a line starting with `!`
-//! is a command either way.
+//! A line that isn't a command but names a program runs it, like `run`: a path, or a name in
+//! `/bin`, and a trailing `&` runs it in the background. While a program runs in the
+//! foreground, lines go to it as input instead; a line starting with `!` is a command either
+//! way.
 
 mod led;
 mod memory;
@@ -56,7 +57,7 @@ const HELP: &[Command] = &[Command {
             let usage = usage(command);
             reply.line(LineKind::Help, format_args!("{:<20} {}", usage, command.description));
         }
-        reply.line(LineKind::Help, format_args!("{:<20} {}", "<program> [args]", "run a program from /bin, like run"));
+        reply.line(LineKind::Help, format_args!("{:<20} {}", "<program> [args] [&]", "run a program from /bin, like run"));
         Outcome::Done
     },
 }];

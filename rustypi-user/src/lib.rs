@@ -125,7 +125,8 @@ pub fn args() -> &'static str {
     core::str::from_utf8(bytes).unwrap_or("")
 }
 
-/// Ends the program.
+/// Ends the program, straight away: destructors don't run, so a `fs::NewFile` that wasn't
+/// committed is thrown away.
 pub fn exit(code: i32) -> ! {
     let _ = syscall::call(Syscall::Exit { code });
     unreachable!("exit returned")

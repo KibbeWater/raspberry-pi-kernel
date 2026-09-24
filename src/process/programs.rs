@@ -1,5 +1,5 @@
 // programs.rs
-//! Built-in test programs, until programs can be loaded from the SD card.
+//! Built-in programs, kept as self-tests (`programs test`) that need nothing on the SD card.
 //!
 //! They are hand-written assembly (`programs.s`), because Rust compiled into the kernel
 //! would call into kernel memory (for formatting, panics, memcpy...), which EL0 can't run.

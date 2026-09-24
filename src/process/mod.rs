@@ -156,7 +156,7 @@ struct Running {
     input: VecDeque<u8>,
     /// Whether it is waiting in `Read` for typed input right now.
     reading_input: bool,
-    /// Files, directories and children it has open.
+    /// What it has open: files, directories, children, pipe ends, the screen.
     handles: handles::Handles,
     /// The child it is waiting on, which gets its input meanwhile.
     waiting_for: Option<TaskId>,

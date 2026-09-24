@@ -46,10 +46,11 @@ pub const MAX_RANDOM: usize = 256;
 /// Longest path `Open` and `OpenDir` take, in bytes.
 pub const MAX_PATH: usize = 256;
 
-/// Biggest file `Open` takes, in bytes: the kernel reads it whole.
+/// Biggest file `Open` and `Spawn` take, and `Create` writes, in bytes: the kernel holds it
+/// whole. Past a limit on what all programs hold together, they get `NoMemory`.
 pub const MAX_FILE: usize = 4 * 1024 * 1024;
 
-/// Most handles a program can have open at once (files, directories, children and pipe ends),
+/// Most handles a program can have open at once (of any kind),
 /// besides `INPUT` and `OUTPUT`.
 pub const MAX_HANDLES: usize = 16;
 
@@ -120,10 +121,10 @@ impl Number {
 pub enum Syscall {
     /// Ends the program with an exit code. Never returns.
     Exit { code: i32 },
-    /// Writes up to `MAX_WRITE` bytes from `ptr` to a handle: `OUTPUT` or a pipe's write end.
-    /// Returns how many were written (a pipe takes what fits, waiting until something does).
-    /// On the console, invalid UTF-8 and `$` are shown as `?`. `BrokenPipe` once a pipe has
-    /// no readers left.
+    /// Writes up to `MAX_WRITE` bytes from `ptr` to a handle: `OUTPUT`, a pipe's write end or
+    /// a file from `Create`. Returns how many were written (a pipe takes what fits, waiting
+    /// until something does). On the console, invalid UTF-8 and `$` are shown as `?`.
+    /// `BrokenPipe` once a pipe has no readers left, `NoSpace` past `MAX_FILE` in a file.
     Write { handle: u64, ptr: u64, len: u64 },
     /// Lets other tasks run. Returns 0.
     Yield,
@@ -151,8 +152,10 @@ pub enum Syscall {
     /// Writes the directory's next [`DirEntry`] to `entry`. Returns 1, or 0 once all have
     /// been read.
     ReadDir { handle: u64, entry: u64 },
-    /// Closes a handle from `Open`, `OpenDir`, `Spawn` (the child runs on, unwatched) or
-    /// `Pipe`. Exiting closes them all.
+    /// Closes a handle from `Open`, `OpenDir`, `Spawn` (the child runs on, unwatched), `Pipe`,
+    /// `OpenScreen` (the console comes back) or `Create` (the file is written, and the result
+    /// is whether that worked). Exiting closes them all, except that files from `Create` are
+    /// thrown away unwritten.
     Close { handle: u64 },
     /// Starts the program in the file at `path..path + path_len`, with the arguments at
     /// `args..args + args_len`. Its `INPUT` is `input`: this program's `INPUT`, or a pipe's
@@ -177,8 +180,8 @@ pub enum Syscall {
     Draw { handle: u64, x: u64, y: u64, width: u64, height: u64, pixels: u64 },
     /// Starts a new file at the path, replacing any file there once written. Returns a handle
     /// to `Write` it; closing the handle writes it all to the card at once (so a program that
-    /// dies part way leaves the old file as it was). `Protected` for files the Pi needs to
-    /// boot. Closing reports whether the write worked.
+    /// dies part way leaves the old file as it was, and so does exiting without closing it).
+    /// `Protected` for files the Pi needs to boot. Closing reports whether the write worked.
     Create { path: u64, len: u64 },
     /// Removes the file, or empty directory, at the path.
     Remove { path: u64, len: u64 },

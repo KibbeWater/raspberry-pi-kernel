@@ -4,9 +4,7 @@ use crate::board::PERIPHERAL_BASE;
 
 const GPIO_BASE: usize = PERIPHERAL_BASE + 0x20_0000;
 
-/// Represents the memory‑mapped registers for the GPIO peripheral.
-///
-/// Only the registers needed for this example are defined.
+/// The GPIO peripheral's memory-mapped registers, up to the pull-up/down clocks.
 #[repr(C)]
 struct GpioRegisters {
     /// Function Select registers (GPFSEL0–GPFSEL5)
@@ -118,12 +116,7 @@ fn clear_pin_internal(pin: Pin) {
     }
 }
 
-/// Sets the output state of a GPIO pin.
-///
-/// Instead of separate functions for setting and clearing,
-/// this function takes a boolean value:
-/// - `true` sets (turns ON) the pin.
-/// - `false` clears (turns OFF) the pin.
+/// Drives an output pin high (`true`) or low (`false`).
 pub fn write_pin(pin: Pin, state: bool) {
     if state {
         set_pin_internal(pin);

@@ -1,4 +1,4 @@
-// fat.rs
+// fat/mod.rs
 //! FAT16 and FAT32 filesystem: reading here, writing (for devices that can) in `write`.
 //!
 //! A FAT volume is: a boot sector describing the layout, the file allocation table (a linked
@@ -302,7 +302,7 @@ impl<D: BlockDevice> Fat<D> {
             if entry.kind != EntryKind::Directory {
                 return Err(FatError::NotADirectory);
             }
-            // A ".." entry pointing at the root uses cluster 0.
+            // Cluster 0 means the root, as in a ".." entry (which lookups skip).
             dir = if entry.first_cluster.0 == 0 { Dir::Root } else { Dir::Chain(entry.first_cluster) };
         }
         Ok(dir)

@@ -191,7 +191,8 @@ impl Program<'_> {
     }
 }
 
-/// Loading a valid program failed: the address space already had something in its way.
+/// Loading a valid program failed: out of memory for its pages, or something already in
+/// the way in the address space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoadError {
     Map(MapError),
