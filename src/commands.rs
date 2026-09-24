@@ -23,7 +23,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("heap [test]", "heap usage, or run an allocator stress test"),
     ("screen [test|redraw]", "screen info, colour bars, or redraw the text"),
     ("sd", "sd card and filesystem info"),
-    ("ls [path]", "list a directory on the sd card"),
+    ("ls [-a] [path]", "list a directory; -a includes dotfiles"),
     ("cat <path>", "show the start of a text file"),
     ("reboot", "reset the board"),
     ("shutdown", "halt; pull GPIO3 low to boot again"),
@@ -93,8 +93,8 @@ impl Shell {
             }
             "screen redraw" => reply.rsp(if sys::console::redraw() { "redrawn" } else { "no screen" }),
             "sd" => sd(reply),
-            "ls" => ls("/", reply),
-            _ if text.starts_with("ls ") => ls(text["ls ".len()..].trim(), reply),
+            "ls" => ls("", reply),
+            _ if text.starts_with("ls ") => ls(&text["ls ".len()..], reply),
             _ if text.starts_with("cat ") => cat(text["cat ".len()..].trim(), reply),
             "reboot" => {
                 reply.rsp("rebooting");
@@ -156,11 +156,19 @@ fn sd(reply: &mut Reply) {
     }
 }
 
-fn ls(path: &str, reply: &mut Reply) {
+/// `ls [-a] [path]`. Dotfiles (like the `._*` files macOS leaves on FAT volumes) are hidden
+/// unless `-a` is given.
+fn ls(args: &str, reply: &mut Reply) {
+    let (all, path) = match args.trim().strip_prefix("-a") {
+        Some(rest) if rest.is_empty() || rest.starts_with(' ') => (true, rest.trim()),
+        _ => (false, args.trim()),
+    };
+    let path = if path.is_empty() { "/" } else { path };
     let entries = match sys::fs::read_dir(path) {
         Ok(entries) => entries,
         Err(error) => return reply.line(LineKind::Rsp, format_args!("{}: {}", path, error)),
     };
+    let entries: Vec<_> = entries.into_iter().filter(|e| all || !e.name.starts_with('.')).collect();
     if entries.is_empty() {
         reply.rsp("(empty)");
     }

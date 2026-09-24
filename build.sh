@@ -27,7 +27,10 @@ if [ ! -d "$BOOTFS" ]; then
     exit 0
 fi
 
-cp "$IMAGE" "$BOOTFS/kernel8.img"
+# -X skips extended attributes, which macOS would otherwise store on FAT as a ._kernel8.img
+# file. dot_clean -m removes any ._* files already there (from Finder copies, say).
+cp -X "$IMAGE" "$BOOTFS/kernel8.img"
+dot_clean -m "$BOOTFS"
 sync
 cmp -s "$IMAGE" "$BOOTFS/kernel8.img" || { echo "Install failed: $BOOTFS/kernel8.img differs" >&2; exit 1; }
 echo "Installed to $BOOTFS/kernel8.img"
