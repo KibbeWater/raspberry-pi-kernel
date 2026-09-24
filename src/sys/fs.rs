@@ -5,6 +5,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
+use rustypi_abi::MAX_FILE;
 use rustypi_core::block::{BlockDevice, Lba, WritableBlockDevice, BLOCK_SIZE};
 use rustypi_core::fat::{Fat, FatError, FatType};
 use rustypi_core::mbr::{self, Volume};
@@ -24,6 +25,8 @@ pub enum FsError {
     NoSpareBlocks,
     /// A file the Pi needs to boot, which is left alone.
     Protected,
+    /// Bigger than `MAX_FILE`, too big to read whole into the kernel heap.
+    TooBig,
 }
 
 impl From<SdError> for FsError {
@@ -47,6 +50,7 @@ impl fmt::Display for FsError {
             FsError::NotMounted => write!(f, "no filesystem mounted"),
             FsError::NoSpareBlocks => write!(f, "no blocks before the first partition to test on"),
             FsError::Protected => write!(f, "the Pi needs it to boot, so it can't be changed"),
+            FsError::TooBig => write!(f, "bigger than {} MB, too big to read", MAX_FILE >> 20),
         }
     }
 }
@@ -217,7 +221,13 @@ pub fn write_test() -> Result<(bool, bool), FsError> {
     })
 }
 
-/// Reads a whole file.
+/// Reads a whole file, of at most `MAX_FILE` bytes so a huge one can't use up the kernel heap.
 pub fn read_file(path: &str) -> Result<Vec<u8>, FsError> {
-    with_fs(|fs| Ok(fs.fat.read_file(path)?))
+    with_fs(|fs| {
+        let entry = fs.fat.metadata(path)?;
+        if entry.kind == EntryKind::File && entry.size as usize > MAX_FILE {
+            return Err(FsError::TooBig);
+        }
+        Ok(fs.fat.read_file(path)?)
+    })
 }

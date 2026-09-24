@@ -2,6 +2,7 @@
 //! The SD card and its filesystem.
 
 use alloc::vec::Vec;
+use rustypi_abi::MAX_FILE;
 use rustypi_core::mbr::Volume;
 use rustypi_core::session::{LineKind, Reply};
 use super::{Command, Outcome, Shell};
@@ -113,10 +114,13 @@ fn sd<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     Outcome::Done
 }
 
-/// Times reading the biggest file in the root directory.
+/// Times reading the biggest file in the root directory that the kernel reads whole.
 fn bench(reply: &mut Reply) {
     let biggest = sys::fs::read_dir("/").ok().and_then(|entries| {
-        entries.into_iter().filter(|entry| entry.kind == EntryKind::File).max_by_key(|entry| entry.size)
+        entries
+            .into_iter()
+            .filter(|entry| entry.kind == EntryKind::File && entry.size as usize <= MAX_FILE)
+            .max_by_key(|entry| entry.size)
     });
     let Some(file) = biggest else {
         reply.rsp("sd bench: no file to read");

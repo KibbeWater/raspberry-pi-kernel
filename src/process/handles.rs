@@ -93,6 +93,7 @@ fn errno(error: FsError) -> Errno {
         FsError::Fat(FatError::NotEmpty) => Errno::NotEmpty,
         FsError::Fat(FatError::InvalidName | FatError::TooBig) => Errno::Invalid,
         FsError::Protected => Errno::Protected,
+        FsError::TooBig => Errno::NoMemory,
         _ => Errno::Io,
     }
 }
@@ -113,20 +114,8 @@ fn user_string(ptr: u64, len: u64, max: usize) -> Result<String, Errno> {
     String::from_utf8(buf).map_err(|_| Errno::Invalid)
 }
 
-/// Reads a whole file, checking its size first so a huge one can't use up the kernel heap.
-fn read_file(path: &str) -> Result<Vec<u8>, Errno> {
-    let entry = fs::metadata(path).map_err(errno)?;
-    if entry.kind == EntryKind::Directory {
-        return Err(Errno::IsADirectory);
-    }
-    if entry.size as usize > MAX_FILE {
-        return Err(Errno::NoMemory);
-    }
-    fs::read_file(path).map_err(errno)
-}
-
 pub(super) fn open(path: u64, len: u64) -> Result<u64, Errno> {
-    let data = read_file(&user_string(path, len, MAX_PATH)?)?;
+    let data = fs::read_file(&user_string(path, len, MAX_PATH)?).map_err(errno)?;
     with_running(|running| running.handles.insert(Open::File { data, position: 0 }))
 }
 
@@ -319,7 +308,7 @@ pub(super) fn spawn(path: u64, path_len: u64, args: u64, args_len: u64, input: u
         }
         Ok(Io { input: stream_for(running, input, End::Read)?, output: stream_for(running, output, End::Write)? })
     })?;
-    let file = read_file(&path)?;
+    let file = fs::read_file(&path).map_err(errno)?;
     let program = elf::parse(&file).map_err(|_| Errno::NotExecutable)?;
     let name = path.rsplit('/').next().unwrap_or(&path);
     let parent = sched::current();
