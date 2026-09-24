@@ -12,7 +12,7 @@ use crate::sys::fs::EntryKind;
 const MAX_LISTING_LINES: usize = 40;
 
 pub const COMMANDS: &[Command] = &[
-    Command { name: "sd", args: "[bench]", description: "sd card and filesystem info, or a read speed test", run: sd },
+    Command { name: "sd", args: "[bench|writetest]", description: "sd card info, a read speed test, or a write test", run: sd },
     Command { name: "ls", args: "[-a] [path]", description: "list a directory; -a shows dotfiles", run: ls },
     Command { name: "cat", args: "<path>", description: "show the start of a text file", run: cat },
 ];
@@ -22,6 +22,18 @@ fn sd<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
         "" => {}
         "bench" => {
             bench(reply);
+            return Outcome::Done;
+        }
+        "writetest" => {
+            match sys::fs::write_test() {
+                Ok((true, true)) => reply.rsp("write test passed: single and multi-block writes read back, old contents restored"),
+                Ok((patterns, restored)) => reply.line(LineKind::Rsp, format_args!(
+                    "write test FAILED: patterns {}, restore {}",
+                    if patterns { "ok" } else { "wrong" },
+                    if restored { "ok" } else { "wrong" },
+                )),
+                Err(error) => reply.line(LineKind::Rsp, format_args!("write test: {}", error)),
+            }
             return Outcome::Done;
         }
         _ => return Outcome::Usage,

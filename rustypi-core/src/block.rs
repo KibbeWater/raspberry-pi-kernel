@@ -1,5 +1,5 @@
 // block.rs
-//! Block devices: storage read in fixed 512-byte blocks, like an SD card.
+//! Block devices: storage read (and maybe written) in fixed 512-byte blocks, like an SD card.
 
 use core::fmt;
 
@@ -40,6 +40,30 @@ pub trait BlockDevice {
     }
 }
 
+/// A block device that can be written, too. Separate, so code that writes (like FAT's
+/// file creation) can't be handed a read-only device.
+pub trait WritableBlockDevice: BlockDevice {
+    fn write_block(&mut self, lba: Lba, block: &Block) -> Result<(), Self::Error>;
+
+    /// Writes consecutive blocks from `lba` on; like `read_blocks`, one at a time by default.
+    fn write_blocks(&mut self, lba: Lba, blocks: &[Block]) -> Result<(), Self::Error> {
+        for (i, block) in blocks.iter().enumerate() {
+            self.write_block(lba.offset(i as u64), block)?;
+        }
+        Ok(())
+    }
+}
+
+impl<D: WritableBlockDevice + ?Sized> WritableBlockDevice for &mut D {
+    fn write_block(&mut self, lba: Lba, block: &Block) -> Result<(), Self::Error> {
+        (**self).write_block(lba, block)
+    }
+
+    fn write_blocks(&mut self, lba: Lba, blocks: &[Block]) -> Result<(), Self::Error> {
+        (**self).write_blocks(lba, blocks)
+    }
+}
+
 impl<D: BlockDevice + ?Sized> BlockDevice for &mut D {
     type Error = D::Error;
 
@@ -65,6 +89,8 @@ pub(crate) mod memory {
         pub reads: usize,
         /// Read commands: a multi-block read is one.
         pub commands: usize,
+        /// Blocks written.
+        pub writes: usize,
     }
 
     impl MemoryDisk {
@@ -96,6 +122,14 @@ pub(crate) mod memory {
                 self.reads += 1;
                 *block = self.blocks.get(&(lba.0 + i as u64)).copied().unwrap_or([0; BLOCK_SIZE]);
             }
+            Ok(())
+        }
+    }
+
+    impl WritableBlockDevice for MemoryDisk {
+        fn write_block(&mut self, lba: Lba, block: &Block) -> Result<(), Self::Error> {
+            self.writes += 1;
+            self.blocks.insert(lba.0, *block);
             Ok(())
         }
     }

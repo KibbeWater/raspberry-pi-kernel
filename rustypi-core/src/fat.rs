@@ -203,6 +203,11 @@ impl<D: BlockDevice> Fat<D> {
         })
     }
 
+    /// The device the volume is on, for work outside the filesystem (like testing it).
+    pub fn device(&mut self) -> &mut D {
+        &mut self.device
+    }
+
     pub fn fat_type(&self) -> FatType {
         self.fat_type
     }

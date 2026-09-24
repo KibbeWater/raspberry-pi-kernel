@@ -82,6 +82,15 @@ pub fn find_fat_volume(block0: &Block) -> Option<Volume> {
         .find_map(|(index, p)| p.filter(|p| p.kind.is_fat()).map(|partition| Volume::Partition { index, partition }))
 }
 
+/// Where the earliest partition starts: the blocks between the MBR and it belong to no
+/// partition. `None` without a partition table.
+pub fn first_partition_start(block0: &Block) -> Option<Lba> {
+    if is_fat_boot_sector(block0) {
+        return None;
+    }
+    partitions(block0)?.into_iter().flatten().map(|partition| partition.start).min()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +119,13 @@ mod tests {
             partition: Partition { kind: PartitionType(0x0C), start: Lba(8192), blocks: 500_000 },
         });
         assert_eq!(volume.start(), Lba(8192));
+    }
+
+    #[test]
+    fn the_first_partition_start_is_the_lowest_of_all() {
+        let block = mbr(&[(0, 0x0C, 8192, 500_000), (1, 0x83, 2048, 1000)]);
+        assert_eq!(first_partition_start(&block), Some(Lba(2048)));
+        assert_eq!(first_partition_start(&mbr(&[])), None);
     }
 
     #[test]

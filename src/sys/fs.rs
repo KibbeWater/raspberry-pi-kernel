@@ -2,9 +2,10 @@
 //! The SD card's FAT volume, mounted at boot.
 
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
-use rustypi_core::block::{BlockDevice, Lba, BLOCK_SIZE};
+use rustypi_core::block::{BlockDevice, Lba, WritableBlockDevice, BLOCK_SIZE};
 use rustypi_core::fat::{Fat, FatError, FatType};
 use rustypi_core::mbr::{self, Volume};
 use crate::drivers::sdcard::{SdCard, SdError};
@@ -19,6 +20,8 @@ pub enum FsError {
     NoFatVolume,
     Fat(FatError<SdError>),
     NotMounted,
+    /// No blocks outside every partition to test writing on.
+    NoSpareBlocks,
 }
 
 impl From<SdError> for FsError {
@@ -40,6 +43,7 @@ impl fmt::Display for FsError {
             FsError::NoFatVolume => write!(f, "no FAT volume on the card"),
             FsError::Fat(error) => write!(f, "{}", error),
             FsError::NotMounted => write!(f, "no filesystem mounted"),
+            FsError::NoSpareBlocks => write!(f, "no blocks before the first partition to test on"),
         }
     }
 }
@@ -103,6 +107,43 @@ pub fn read_dir(path: &str) -> Result<Vec<DirEntry>, FsError> {
 /// Looks up a file or directory.
 pub fn metadata(path: &str) -> Result<DirEntry, FsError> {
     with_fs(|fs| Ok(fs.fat.metadata(path)?))
+}
+
+/// Blocks the write test uses.
+const WRITE_TEST_BLOCKS: usize = 9;
+
+/// Tests writing to the card, outside the filesystem: on blocks halfway between the MBR and
+/// the first partition, which belong to nothing. Writes one block, then eight in one go,
+/// reads them back, and puts back what was there. Returns whether the patterns and the
+/// restored blocks read back right.
+pub fn write_test() -> Result<(bool, bool), FsError> {
+    with_fs(|fs| {
+        let card = fs.fat.device();
+        let mut block0 = [0; BLOCK_SIZE];
+        card.read_block(Lba(0), &mut block0)?;
+        let first = mbr::first_partition_start(&block0).ok_or(FsError::NoSpareBlocks)?;
+        if first.0 < 2 * WRITE_TEST_BLOCKS as u64 + 2 {
+            return Err(FsError::NoSpareBlocks);
+        }
+        let at = Lba(first.0 / 2);
+        let mut saved = vec![[0; BLOCK_SIZE]; WRITE_TEST_BLOCKS];
+        card.read_blocks(at, &mut saved)?;
+        let pattern: Vec<_> = (0..WRITE_TEST_BLOCKS)
+            .map(|i| core::array::from_fn(|j| (i * 31 + j * 7) as u8 ^ 0xA5))
+            .collect();
+
+        let mut back = vec![[0; BLOCK_SIZE]; WRITE_TEST_BLOCKS];
+        let written = card
+            .write_block(at, &pattern[0])
+            .and_then(|()| card.write_blocks(at.offset(1), &pattern[1..]))
+            .and_then(|()| card.read_blocks(at, &mut back));
+        // Put the old contents back whatever happened.
+        card.write_blocks(at, &saved)?;
+        written?;
+        let patterns_ok = back == pattern;
+        card.read_blocks(at, &mut back)?;
+        Ok((patterns_ok, back == saved))
+    })
 }
 
 /// Reads a whole file.

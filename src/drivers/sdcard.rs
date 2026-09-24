@@ -1,16 +1,17 @@
 // sdcard.rs
-//! SD card through the Arasan EMMC controller (an SDHCI host), read-only, polled. Follows
+//! SD card through the Arasan EMMC controller (an SDHCI host), polled. Follows
 //! the SD Physical Layer Simplified Specification's initialisation: reset, CMD0, CMD8,
 //! ACMD41 until ready, CMD2, CMD3, CMD7. Then it speeds up where the card allows: the 4-bit
 //! bus (ACMD6) and high-speed mode at 50MHz (CMD6), falling back to 1 bit and 25MHz.
-//! Consecutive blocks are read with one multi-block command.
+//! Consecutive blocks are read and written with one multi-block command. After a write, it
+//! waits for the card to finish programming before the next command.
 //!
 //! On the Pi 3 the card slot's pins (GPIO 48-53) are wired to the firmware's SDHOST
 //! controller at boot; they are switched over to the EMMC controller here.
 
 use core::fmt;
 use core::ptr::{read_volatile, write_volatile};
-use rustypi_core::block::{Block, BlockDevice, Lba, BLOCK_SIZE};
+use rustypi_core::block::{Block, BlockDevice, Lba, WritableBlockDevice, BLOCK_SIZE};
 use rustypi_core::sd;
 use crate::board::PERIPHERAL_BASE;
 use crate::drivers::gpio::{set_pin_mode, set_pin_pull, Pin, PinMode, PullMode};
@@ -54,6 +55,7 @@ const SRST_DATA: u32 = 1 << 26;
 // INTERRUPT
 const INT_CMD_DONE: u32 = 1 << 0;
 const INT_DATA_DONE: u32 = 1 << 1;
+const INT_WRITE_RDY: u32 = 1 << 4;
 const INT_READ_RDY: u32 = 1 << 5;
 const INT_ERROR: u32 = 1 << 15;
 const INT_ALL: u32 = 0xFFFF_FFFF;
@@ -82,8 +84,14 @@ const BUS_WIDTH_4: u32 = 2;
 const SWITCH_HIGH_SPEED: u32 = 0x80FF_FFF1;
 /// Bytes of status CMD6 returns.
 const SWITCH_STATUS_LEN: usize = 64;
-/// Most blocks one multi-block read may ask for (BLKSIZECNT has 16 bits for the count).
-const MAX_BLOCKS_PER_READ: usize = 0xFFFF;
+/// Most blocks one multi-block transfer may cover (BLKSIZECNT has 16 bits for the count).
+const MAX_BLOCKS_PER_TRANSFER: usize = 0xFFFF;
+/// Card status (R1): ready for data, in the transfer state (4) of bits 12:9.
+const STATUS_READY_FOR_DATA: u32 = 1 << 8;
+const STATUS_STATE_TRANSFER: u32 = 4 << 9;
+const STATUS_STATE_MASK: u32 = 0xF << 9;
+/// Writing a block can take the card a while.
+const PROGRAMMING_TIMEOUT: u64 = 1_000_000;
 
 /// CMD8 argument: 2.7-3.6V, and a check pattern the card echoes.
 const IF_COND_ARG: u32 = 0x1AA;
@@ -111,24 +119,36 @@ enum ResponseKind {
     Long,
 }
 
-/// An SD command with the response it produces, so each is always sent with the right
-/// response handling.
+/// Which way a command's data goes, if it has any.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Data {
+    None,
+    Read,
+    Write,
+}
+
+/// An SD command with the response and data it involves, so each is always sent with the
+/// right handling.
 #[derive(Clone, Copy, Debug)]
 struct Command {
     index: u8,
     response: ResponseKind,
-    reads_data: bool,
-    /// Reads BLKSIZECNT's count of blocks, then stops the card with an automatic CMD12.
+    data: Data,
+    /// Transfers BLKSIZECNT's count of blocks, then stops the card with an automatic CMD12.
     multi_block: bool,
 }
 
 impl Command {
     const fn new(index: u8, response: ResponseKind) -> Self {
-        Command { index, response, reads_data: false, multi_block: false }
+        Command { index, response, data: Data::None, multi_block: false }
     }
 
     const fn reading(index: u8) -> Self {
-        Command { index, response: ResponseKind::Short, reads_data: true, multi_block: false }
+        Command { index, response: ResponseKind::Short, data: Data::Read, multi_block: false }
+    }
+
+    const fn writing(index: u8) -> Self {
+        Command { index, response: ResponseKind::Short, data: Data::Write, multi_block: false }
     }
 
     fn encode(self) -> u32 {
@@ -139,7 +159,11 @@ impl Command {
             ResponseKind::ShortNoCheck => CMD_RESPONSE_48,
             ResponseKind::Long => CMD_RESPONSE_136 | CMD_CRC_CHECK,
         };
-        let data = if self.reads_data { CMD_DATA | CMD_READ } else { 0 };
+        let data = match self.data {
+            Data::None => 0,
+            Data::Read => CMD_DATA | CMD_READ,
+            Data::Write => CMD_DATA,
+        };
         let multi = if self.multi_block { TM_MULTI_BLOCK | TM_BLKCNT_EN | TM_AUTO_CMD12 } else { 0 };
         (self.index as u32) << 24 | response | data | multi
     }
@@ -151,10 +175,13 @@ const SEND_RELATIVE_ADDR: Command = Command::new(3, ResponseKind::Short);
 const SELECT_CARD: Command = Command::new(7, ResponseKind::ShortBusy);
 const SEND_IF_COND: Command = Command::new(8, ResponseKind::Short);
 const SEND_CSD: Command = Command::new(9, ResponseKind::Long);
+const SEND_STATUS: Command = Command::new(13, ResponseKind::Short);
 const SET_BLOCKLEN: Command = Command::new(16, ResponseKind::Short);
 const SWITCH_FUNC: Command = Command::reading(6);
 const READ_SINGLE_BLOCK: Command = Command::reading(17);
 const READ_MULTIPLE_BLOCK: Command = Command { multi_block: true, ..Command::reading(18) };
+const WRITE_BLOCK: Command = Command::writing(24);
+const WRITE_MULTIPLE_BLOCK: Command = Command { multi_block: true, ..Command::writing(25) };
 const APP_CMD: Command = Command::new(55, ResponseKind::Short);
 /// Application commands: must follow APP_CMD.
 const SET_BUS_WIDTH: Command = Command::new(6, ResponseKind::Short);
@@ -377,6 +404,29 @@ impl SdCard {
         Ok(())
     }
 
+    /// Writes one block's worth of data (`buf`) once the controller wants it.
+    fn write_data(&mut self, cmd: Command, buf: &[u8]) -> Result<(), SdError> {
+        self.wait_for(cmd, INT_WRITE_RDY, "room for data", DATA_TIMEOUT)?;
+        for word in buf.chunks_exact(4) {
+            write(DATA, u32::from_le_bytes(word.try_into().unwrap()));
+        }
+        Ok(())
+    }
+
+    /// Waits until the card has programmed what it was sent and is ready for more.
+    fn wait_until_programmed(&mut self) -> Result<(), SdError> {
+        let start = timer::now_us();
+        loop {
+            let status = self.command(SEND_STATUS, self.rca)?[0];
+            if status & STATUS_READY_FOR_DATA != 0 && status & STATUS_STATE_MASK == STATUS_STATE_TRANSFER {
+                return Ok(());
+            }
+            if timer::now_us() - start > PROGRAMMING_TIMEOUT {
+                return Err(SdError::Timeout("card to finish writing"));
+            }
+        }
+    }
+
     fn address(&self, lba: Lba) -> Result<u32, SdError> {
         let address = if self.high_capacity { lba.0 } else { lba.0 * BLOCK_SIZE as u64 };
         u32::try_from(address).map_err(|_| SdError::OutOfRange(lba))
@@ -384,7 +434,7 @@ impl SdCard {
 
     /// Sends `cmd` and returns the response registers.
     fn command(&mut self, cmd: Command, arg: u32) -> Result<[u32; 4], SdError> {
-        let uses_data = cmd.reads_data || cmd.response == ResponseKind::ShortBusy;
+        let uses_data = cmd.data != Data::None || cmd.response == ResponseKind::ShortBusy;
         let busy = CMD_INHIBIT | if uses_data { DAT_INHIBIT } else { 0 };
         wait("command line", COMMAND_TIMEOUT, || read(STATUS) & busy == 0)?;
 
@@ -427,7 +477,7 @@ impl BlockDevice for SdCard {
 
     fn read_blocks(&mut self, lba: Lba, blocks: &mut [Block]) -> Result<(), SdError> {
         let mut lba = lba;
-        for chunk in blocks.chunks_mut(MAX_BLOCKS_PER_READ) {
+        for chunk in blocks.chunks_mut(MAX_BLOCKS_PER_TRANSFER) {
             if let [block] = chunk {
                 self.read_block(lba, block)?;
             } else {
@@ -439,6 +489,38 @@ impl BlockDevice for SdCard {
                 }
                 // Includes the automatic CMD12.
                 self.wait_for(READ_MULTIPLE_BLOCK, INT_DATA_DONE, "end of data", DATA_TIMEOUT)?;
+            }
+            lba = lba.offset(chunk.len() as u64);
+        }
+        Ok(())
+    }
+}
+
+impl WritableBlockDevice for SdCard {
+    fn write_block(&mut self, lba: Lba, block: &Block) -> Result<(), SdError> {
+        let address = self.address(lba)?;
+        write(BLKSIZECNT, 1 << 16 | BLOCK_SIZE as u32);
+        self.command(WRITE_BLOCK, address)?;
+        self.write_data(WRITE_BLOCK, block)?;
+        self.wait_for(WRITE_BLOCK, INT_DATA_DONE, "end of data", PROGRAMMING_TIMEOUT)?;
+        self.wait_until_programmed()
+    }
+
+    fn write_blocks(&mut self, lba: Lba, blocks: &[Block]) -> Result<(), SdError> {
+        let mut lba = lba;
+        for chunk in blocks.chunks(MAX_BLOCKS_PER_TRANSFER) {
+            if let [block] = chunk {
+                self.write_block(lba, block)?;
+            } else {
+                let address = self.address(lba)?;
+                write(BLKSIZECNT, (chunk.len() as u32) << 16 | BLOCK_SIZE as u32);
+                self.command(WRITE_MULTIPLE_BLOCK, address)?;
+                for block in chunk {
+                    self.write_data(WRITE_MULTIPLE_BLOCK, block)?;
+                }
+                // Includes the automatic CMD12.
+                self.wait_for(WRITE_MULTIPLE_BLOCK, INT_DATA_DONE, "end of data", PROGRAMMING_TIMEOUT)?;
+                self.wait_until_programmed()?;
             }
             lba = lba.offset(chunk.len() as u64);
         }
