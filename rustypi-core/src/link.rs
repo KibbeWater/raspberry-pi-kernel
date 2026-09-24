@@ -17,7 +17,7 @@
 use core::fmt::{self, Write};
 
 /// Longest line (excluding the `\n`) we accept. Keep in sync with the Arduino sketch.
-pub const MAX_LINE: usize = 96;
+pub const MAX_LINE: usize = 160;
 
 /// Receive-side counters, reported to the Arduino in `STAT` frames.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

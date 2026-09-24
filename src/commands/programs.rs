@@ -4,8 +4,7 @@
 use alloc::vec::Vec;
 use rustypi_core::session::{LineKind, Reply};
 use super::{Command, Outcome, Shell};
-use crate::arch::exception;
-use crate::process::{self, Exit, PROGRAMS};
+use crate::process::{self, PROGRAMS};
 
 pub const COMMANDS: &[Command] = &[
     Command { name: "programs", args: "[test]", description: "list built-in programs, or test them all", run: programs },
@@ -51,18 +50,12 @@ fn test(reply: &mut Reply) {
                 let exit = process.wait();
                 let ok = program.expected.matches(exit);
                 passed += ok as usize;
-                let verdict = if ok { "ok  " } else { "FAIL" };
-                // The full exit line, addresses and all, is already on the console; the reply
-                // must fit a link line.
-                match exit {
-                    Exit::Code(_) => reply.line(LineKind::Rsp, format_args!("{:<11} {} {}", program.name, verdict, exit)),
-                    Exit::Crashed(fault) => reply.line(LineKind::Rsp, format_args!(
-                        "{:<11} {} crashed: {}",
-                        program.name,
-                        verdict,
-                        exception::class_name(fault.esr),
-                    )),
-                }
+                reply.line(LineKind::Rsp, format_args!(
+                    "{:<11} {} {}",
+                    program.name,
+                    if ok { "ok  " } else { "FAIL" },
+                    exit,
+                ));
             }
             Err(error) => reply.line(LineKind::Rsp, format_args!("{:<11} FAIL {}", program.name, error)),
         }

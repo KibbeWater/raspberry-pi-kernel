@@ -12,8 +12,8 @@ use alloc::vec::Vec;
 use core::fmt::{self, Write};
 
 /// Longest line text that still fits in a frame: `$HELP,65535,99,<text>*HH` must stay
-/// within the 96-byte line limit.
-const MAX_TEXT: usize = 78;
+/// within the link's line limit.
+const MAX_TEXT: usize = crate::link::MAX_LINE - "$HELP,65535,99,*HH".len();
 
 #[derive(Clone, Copy)]
 pub enum LineKind {
@@ -216,9 +216,17 @@ mod tests {
     }
 
     #[test]
+    fn the_longest_line_text_fits_the_largest_frame() {
+        let mut frame = String::new();
+        let text = "x".repeat(MAX_TEXT);
+        crate::link::write_frame(&mut frame, "HELP", format_args!("65535,99,{}", text)).unwrap();
+        assert_eq!(frame.trim_end().len(), crate::link::MAX_LINE);
+    }
+
+    #[test]
     fn long_lines_are_cut_at_a_character_boundary() {
         let mut reply = Reply::new();
-        let long = "é".repeat(60); // 120 bytes
+        let long = "é".repeat(MAX_TEXT); // twice MAX_TEXT bytes
         reply.line(LineKind::Rsp, format_args!("{}", long));
         let text = &reply.lines[0].1;
         assert!(text.len() <= MAX_TEXT);
