@@ -48,6 +48,8 @@ enum Inbound {
     Msg(String),
     /// A line typed on the Pi's own keyboard. Its reply is printed, not framed.
     Local(String),
+    /// Ctrl+C on the Pi's own keyboard.
+    Interrupt,
 }
 
 /// Frames waiting for the shell task, oldest first.
@@ -84,8 +86,11 @@ pub extern "C" fn kernel_main() -> ! {
     sched::spawn("stat", stat_task);
     sys::enable_interrupts();
     println!("cores: {} of {} running", sys::cores::start(), board::CORES);
-    sys::usb::start(|line| {
-        deliver(Inbound::Local(line));
+    sys::usb::start(|input| {
+        deliver(match input {
+            sys::usb::Input::Line(line) => Inbound::Local(line),
+            sys::usb::Input::Interrupt => Inbound::Interrupt,
+        });
     });
     shell_task()
 }
@@ -163,6 +168,7 @@ fn shell_task() -> ! {
                     action.perform();
                 }
             }
+            Inbound::Interrupt => shell.interrupt(),
             Inbound::Local(line) => {
                 let mut reply = Reply::new();
                 let action = shell.handle(&line, &mut reply);

@@ -114,6 +114,15 @@ impl<E> Device<E> {
         }
     }
 
+    /// What kind of device it is: its own class, or if it leaves that to its interfaces, its
+    /// first interface's.
+    pub fn class(&self) -> Class {
+        match self.descriptor.class {
+            Class::PER_INTERFACE => self.configuration.interfaces.first().map_or(Class::PER_INTERFACE, |i| i.class),
+            class => class,
+        }
+    }
+
     /// This device and everything behind it, depth first, each with how many hubs deep it is.
     pub fn walk(&self) -> Vec<(usize, &Device<E>)> {
         let mut found = Vec::new();

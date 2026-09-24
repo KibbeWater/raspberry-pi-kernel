@@ -107,6 +107,14 @@ impl Shell {
         rustypi_core::path::resolve(&self.cwd, path)
     }
 
+    /// Ctrl+C on the local keyboard: stops the foreground program, if there is one. (It says
+    /// it was killed as it exits.)
+    pub fn interrupt(&mut self) {
+        if let Some(id) = self.foreground.take() {
+            let _ = process::kill(id);
+        }
+    }
+
     /// Runs one command line, or passes it to the foreground program. Returns an action to
     /// perform after the reply is sent.
     pub fn handle<'a>(&mut self, text: &'a str, reply: &mut Reply) -> Option<Action<'a>> {

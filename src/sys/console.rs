@@ -175,6 +175,15 @@ pub fn test_pattern() -> bool {
         .unwrap_or(false)
 }
 
+/// Empties the console, like a terminal's clear screen.
+pub fn clear() {
+    SCREEN.try_lock(|screen| {
+        if let Some(screen) = screen {
+            screen.with_cells(|console, cells| console.clear(cells));
+        }
+    });
+}
+
 /// Draws the console's text again, e.g. after `test_pattern`.
 pub fn redraw() -> bool {
     SCREEN

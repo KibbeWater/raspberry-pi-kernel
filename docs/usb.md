@@ -34,7 +34,9 @@ Ethernet.
 Steps 1 to 4 below are done. USB starts at boot in the background (`sys::usb`); `usb` shows
 the bus as found then. A boot protocol keyboard is polled every 10ms (interrupt transfers,
 split through its hub's translator on the microframe schedule), and what is typed is echoed on
-the screen and handed to the shell a line at a time. No key repeat or hot plugging yet.
+the screen and handed to the shell a line at a time, in the layout `keyboard` chose (US or
+Swedish), with accents, key repeat, and Ctrl+C (stop the foreground program), Ctrl+U and
+Ctrl+L. Hubs are polled every 500ms for devices plugged in or pulled out.
 
 ## The plan
 
