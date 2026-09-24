@@ -81,6 +81,9 @@ pub trait Tag {
     const ID: u32;
     type Request: Words;
     type Response: Words;
+    /// How many bytes of `Response` the firmware answers with: all of it, unless the type is
+    /// padded out to whole words (like the 6-byte MAC address).
+    const RESPONSE_BYTES: usize = size_of::<Self::Response>();
 }
 
 /// An address in the GPU's view of memory, as the firmware hands out (e.g. a framebuffer).
@@ -243,7 +246,7 @@ impl Replies {
         }
         let len = (code & !TAG_RESPONSE) as usize;
         let capacity = buf[offset + 1] as usize;
-        let expected = size_of::<T::Response>();
+        let expected = T::RESPONSE_BYTES;
         if len > capacity {
             return Err(MailboxError::Truncated { tag: T::ID, needed: len, capacity });
         }
@@ -369,6 +372,24 @@ mod tests {
             query::<GetArmMemory>(&terse, ()),
             Err(MailboxError::ShortResponse { len: 0, expected: 8, .. }),
         ));
+    }
+
+    #[test]
+    fn padded_responses_may_be_answered_short() {
+        // The firmware answers the MAC address with its 6 bytes; the type pads it to 8.
+        struct MacFirmware;
+        impl Transport for MacFirmware {
+            fn call(&self, msg: &mut Message) {
+                let buf = &mut msg.0;
+                assert_eq!(buf[2], tags::GetMacAddress::ID);
+                buf[5] = u32::from_le_bytes([0xB8, 0x27, 0xEB, 0x12]);
+                buf[6] = u32::from_le_bytes([0x34, 0x56, 0, 0]);
+                buf[4] = TAG_RESPONSE | 6;
+                buf[1] = RESPONSE_OK;
+            }
+        }
+        let mac = query::<tags::GetMacAddress>(&MacFirmware, ()).unwrap();
+        assert_eq!(mac.bytes, [0xB8, 0x27, 0xEB, 0x12, 0x34, 0x56]);
     }
 
     #[test]

@@ -34,6 +34,7 @@ impl Tag for GetMacAddress {
     const ID: u32 = 0x0001_0003;
     type Request = ();
     type Response = MacAddress;
+    const RESPONSE_BYTES: usize = 6;
 }
 
 /// A range of memory, in bytes.
