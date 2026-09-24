@@ -11,8 +11,8 @@
 //! 3. a directory entry points at the chain,
 //! 4. only then are old clusters freed.
 //!
-//! Removing marks the entry deleted first, then frees its clusters. There is no clock, so
-//! entries get a fixed date. On FAT32, the free clusters are counted before the first change,
+//! Removing marks the entry deleted first, then frees its clusters. Entries get the time
+//! `set_time` last gave (a fixed 2026-01-01 until then, for want of a clock). On FAT32, the free clusters are counted before the first change,
 //! and the FSInfo sector's count and next-free hint are kept up after every one.
 
 use alloc::vec;
@@ -20,9 +20,8 @@ use alloc::vec::Vec;
 use super::*;
 use crate::block::WritableBlockDevice;
 
-/// 2026-01-01, for want of a clock.
-const DATE: u16 = (2026 - 1980) << 9 | 1 << 5 | 1;
-const TIME: u16 = 0;
+/// The date and time entries get until `set_time`: 2026-01-01 00:00.
+pub(super) const DEFAULT_STAMP: (u16, u16) = ((2026 - 1980) << 9 | 1 << 5 | 1, 0);
 const ATTR_ARCHIVE: u8 = 0x20;
 /// Longest name, in UTF-16 units.
 const MAX_NAME: usize = 255;
@@ -154,19 +153,24 @@ fn alias(name: &str, taken: &[[u8; 11]]) -> [u8; 11] {
     short
 }
 
-/// The 8.3 entry for a file or directory.
-fn short_entry(short: &[u8; 11], case: u8, attr: u8, cluster: u32, size: u32) -> [u8; DIR_ENTRY_SIZE] {
+/// The 8.3 entry for a file or directory, created and modified at `stamp` (FAT date, time).
+fn short_entry(short: &[u8; 11], case: u8, attr: u8, cluster: u32, size: u32, stamp: (u16, u16)) -> [u8; DIR_ENTRY_SIZE] {
+    let (date, time) = stamp;
     let mut entry = [0; DIR_ENTRY_SIZE];
     entry[..11].copy_from_slice(short);
     entry[11] = attr;
     entry[12] = case;
-    entry[14..16].copy_from_slice(&TIME.to_le_bytes());
-    entry[16..18].copy_from_slice(&DATE.to_le_bytes());
-    entry[18..20].copy_from_slice(&DATE.to_le_bytes());
-    entry[22..24].copy_from_slice(&TIME.to_le_bytes());
-    entry[24..26].copy_from_slice(&DATE.to_le_bytes());
+    entry[14..16].copy_from_slice(&time.to_le_bytes());
+    entry[16..18].copy_from_slice(&date.to_le_bytes());
+    entry[18..20].copy_from_slice(&date.to_le_bytes());
+    set_modified(&mut entry, stamp);
     set_cluster_and_size(&mut entry, cluster, size);
     entry
+}
+
+fn set_modified(entry: &mut [u8], (date, time): (u16, u16)) {
+    entry[22..24].copy_from_slice(&time.to_le_bytes());
+    entry[24..26].copy_from_slice(&date.to_le_bytes());
 }
 
 fn set_cluster_and_size(entry: &mut [u8], cluster: u32, size: u32) {
@@ -202,6 +206,11 @@ fn long_entries(name: &str, short: &[u8; 11]) -> Vec<[u8; DIR_ENTRY_SIZE]> {
 }
 
 impl<D: WritableBlockDevice> Fat<D> {
+    /// The time entries created or changed from now on get.
+    pub fn set_time(&mut self, now: crate::time::DateTime) {
+        self.stamp = now.fat();
+    }
+
     /// Creates the file at `path` with `data` in it, or replaces what an existing file holds.
     /// The parent directory must exist.
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), D::Error> {
@@ -230,8 +239,7 @@ impl<D: WritableBlockDevice> Fat<D> {
                 let slot = located.slots.end - 1;
                 let entry = image.entry(slot);
                 set_cluster_and_size(entry, first, size);
-                entry[22..24].copy_from_slice(&TIME.to_le_bytes());
-                entry[24..26].copy_from_slice(&DATE.to_le_bytes());
+                set_modified(entry, self.stamp);
                 self.store_dir(&image, slot..slot + 1)?;
                 self.free_chain(located.entry.first_cluster.0)?;
             }
@@ -269,9 +277,9 @@ impl<D: WritableBlockDevice> Fat<D> {
             Dir::Root => 0,
             Dir::Chain(cluster) => cluster.0,
         };
-        contents[..DIR_ENTRY_SIZE].copy_from_slice(&short_entry(b".          ", 0, ATTR_DIRECTORY, cluster, 0));
+        contents[..DIR_ENTRY_SIZE].copy_from_slice(&short_entry(b".          ", 0, ATTR_DIRECTORY, cluster, 0, self.stamp));
         contents[DIR_ENTRY_SIZE..2 * DIR_ENTRY_SIZE]
-            .copy_from_slice(&short_entry(b"..         ", 0, ATTR_DIRECTORY, parent_cluster, 0));
+            .copy_from_slice(&short_entry(b"..         ", 0, ATTR_DIRECTORY, parent_cluster, 0, self.stamp));
         self.write_clusters(&[cluster], &contents)?;
         self.link(&[cluster])?;
         if let Err(error) = self.add_entry(dir, &mut image, name, ATTR_DIRECTORY, cluster, 0) {
@@ -516,11 +524,11 @@ impl<D: WritableBlockDevice> Fat<D> {
     fn add_entry(&mut self, dir: Dir, image: &mut DirImage, name: &str, attr: u8, cluster: u32, size: u32) -> Result<(), D::Error> {
         let mut entries = Vec::new();
         match exact_short_name(name) {
-            Some((short, case)) => entries.push(short_entry(&short, case, attr, cluster, size)),
+            Some((short, case)) => entries.push(short_entry(&short, case, attr, cluster, size, self.stamp)),
             None => {
                 let short = alias(name, &image.short_names());
                 entries.extend(long_entries(name, &short));
-                entries.push(short_entry(&short, 0, attr, cluster, size));
+                entries.push(short_entry(&short, 0, attr, cluster, size, self.stamp));
             }
         }
         let at = match image.free_run(entries.len()) {
@@ -583,6 +591,32 @@ mod tests {
         let image = fat.load_dir(dir).unwrap();
         let located = parse_located(&image.bytes, fat.fat_type);
         located.into_iter().find(|l| l.entry.name == name).unwrap().slots.len()
+    }
+
+    /// The (created date, modified date, modified time) of `name`'s entry in `dir`.
+    fn stamps(fat: &mut Fat<MemoryDisk>, dir: &str, name: &str) -> (u16, u16, u16) {
+        let dir = fat.find_dir(dir).unwrap();
+        let image = fat.load_dir(dir).unwrap();
+        let located = parse_located(&image.bytes, fat.fat_type);
+        let slot = located.into_iter().find(|l| l.entry.name == name).unwrap().slots.end - 1;
+        let entry = &image.bytes[slot * DIR_ENTRY_SIZE..(slot + 1) * DIR_ENTRY_SIZE];
+        let word = |at: usize| u16::from_le_bytes([entry[at], entry[at + 1]]);
+        (word(16), word(24), word(22))
+    }
+
+    #[test]
+    fn entries_get_the_time_set_and_replacing_keeps_the_created_date() {
+        for mut fat in volumes() {
+            fat.write_file("/stamped", b"one").unwrap();
+            assert_eq!(stamps(&mut fat, "/", "stamped").0, DEFAULT_STAMP.0);
+            let later = crate::time::DateTime::from_unix(1_790_000_000); // 2026-09-21 14:13:20
+            fat.set_time(later);
+            fat.write_file("/stamped", b"two").unwrap();
+            let (date, time) = later.fat();
+            assert_eq!(stamps(&mut fat, "/", "stamped"), (DEFAULT_STAMP.0, date, time));
+            fat.create_dir("/newdir").unwrap();
+            assert_eq!(stamps(&mut fat, "/", "newdir"), (date, date, time));
+        }
     }
 
     #[test]

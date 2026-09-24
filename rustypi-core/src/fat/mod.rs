@@ -157,6 +157,8 @@ pub struct Fat<D: BlockDevice> {
     fat_cache: Option<(u64, Block)>,
     /// A FAT sector changed by `write` and not written to the FATs yet. Reads see it first.
     fat_dirty: Option<(u64, Block)>,
+    /// The FAT date and time new and changed entries get.
+    stamp: (u16, u16),
     /// Where `write` starts looking for free clusters.
     next_free: u32,
 }
@@ -238,6 +240,7 @@ impl<D: BlockDevice> Fat<D> {
             free_count: None,
             fat_cache: None,
             fat_dirty: None,
+            stamp: write::DEFAULT_STAMP,
             next_free: 2,
         })
     }
