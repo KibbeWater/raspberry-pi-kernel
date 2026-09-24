@@ -486,22 +486,27 @@ fn random(ptr: u64, len: u64) -> Result<u64, Errno> {
     let mut buf = [0; MAX_RANDOM];
     let buf = &mut buf[..len.min(MAX_RANDOM as u64) as usize];
     sys::random::fill(buf);
-    let id = sched::current();
-    PROCESSES.lock(|processes| {
-        let running = processes.get_mut(&id).expect("a user task has a process");
-        running.memory.write_user(ptr, buf).map_err(|_| Errno::Fault)
-    })?;
+    with_running(|running| running.memory.write_user(ptr, buf).map_err(|_| Errno::Fault))?;
     Ok(buf.len() as u64)
+}
+
+/// Runs `f` with the running program.
+fn with_running<R>(f: impl FnOnce(&mut Running) -> R) -> R {
+    let id = sched::current();
+    PROCESSES.lock(|processes| f(processes.get_mut(&id).expect("a user task has a process")))
+}
+
+/// The pipe behind one of the running program's standard streams, `None` for the console.
+fn stream_pipe(stream: impl FnOnce(&Io) -> &Stream) -> Option<pipe::Pipe> {
+    with_running(|running| match stream(&running.io) {
+        Stream::Console => None,
+        Stream::Pipe(end) => Some(end.pipe()),
+    })
 }
 
 /// Reads the running program's `INPUT`: typed lines, or its pipe.
 fn read_input(ptr: u64, len: u64) -> Result<u64, Errno> {
-    let id = sched::current();
-    let pipe = PROCESSES.lock(|processes| match &processes.get(&id).expect("a user task has a process").io.input {
-        Stream::Console => None,
-        Stream::Pipe(end) => Some(end.pipe()),
-    });
-    match pipe {
+    match stream_pipe(|io| &io.input) {
         Some(pipe) => read_pipe(&pipe, ptr, len),
         None => read_typed(ptr, len),
     }
@@ -527,8 +532,7 @@ fn read_typed(ptr: u64, len: u64) -> Result<u64, Errno> {
         PROCESSES.lock(|processes| processes.get(&id).is_none_or(|running| running.killed || !running.input.is_empty()))
     });
     set_reading(false);
-    PROCESSES.lock(|processes| {
-        let running = processes.get_mut(&id).expect("a user task has a process");
+    with_running(|running| {
         let mut buf = [0; MAX_READ];
         let count = len.min(running.input.len());
         for (slot, &byte) in buf.iter_mut().zip(running.input.iter()) {
@@ -545,9 +549,8 @@ fn read_typed(ptr: u64, len: u64) -> Result<u64, Errno> {
 /// Pages mapped before running out of memory stay mapped, past the returned heap end.
 fn map(len: u64) -> Result<u64, Errno> {
     const PAGE: u64 = PAGE_SIZE as u64;
-    let id = sched::current();
     // Only the program itself moves its heap end, and it is busy in here.
-    let start = PROCESSES.lock(|processes| processes.get(&id).expect("a user task has a process").heap_end);
+    let start = with_running(|running| running.heap_end);
     let end = len
         .div_ceil(PAGE)
         .checked_mul(PAGE)
@@ -556,8 +559,7 @@ fn map(len: u64) -> Result<u64, Errno> {
         .ok_or(Errno::NoMemory)?;
     for va in (start..end).step_by(PAGE_SIZE) {
         // A page per lock, so a big heap doesn't keep interrupts masked for long.
-        PROCESSES.lock(|processes| {
-            let running = processes.get_mut(&id).expect("a user task has a process");
+        with_running(|running| {
             running.memory.map(va, Access::ReadWrite)?;
             running.heap_end = va + PAGE;
             Ok(())
@@ -569,12 +571,7 @@ fn map(len: u64) -> Result<u64, Errno> {
 
 /// Writes to the running program's `OUTPUT`: the console, or its pipe.
 fn write_output(ptr: u64, len: u64) -> Result<u64, Errno> {
-    let id = sched::current();
-    let pipe = PROCESSES.lock(|processes| match &processes.get(&id).expect("a user task has a process").io.output {
-        Stream::Console => None,
-        Stream::Pipe(end) => Some(end.pipe()),
-    });
-    if let Some(pipe) = pipe {
+    if let Some(pipe) = stream_pipe(|io| &io.output) {
         return write_pipe(&pipe, ptr, len);
     }
     let mut buf = [0; MAX_WRITE];
@@ -594,10 +591,7 @@ fn read_pipe(pipe: &pipe::Pipe, ptr: u64, len: u64) -> Result<u64, Errno> {
     }
     let count = pipe.read(buf, || was_killed(id));
     // Taken from the pipe already: a bad pointer loses these bytes.
-    PROCESSES.lock(|processes| {
-        let running = processes.get_mut(&id).expect("a user task has a process");
-        running.memory.write_user(ptr, &buf[..count]).map_err(|_| Errno::Fault)
-    })?;
+    with_running(|running| running.memory.write_user(ptr, &buf[..count]).map_err(|_| Errno::Fault))?;
     Ok(count as u64)
 }
 
@@ -616,11 +610,7 @@ fn write_pipe(pipe: &pipe::Pipe, ptr: u64, len: u64) -> Result<u64, Errno> {
 /// it. Goes through its page tables rather than its pointer, so a bad address is an error
 /// here instead of a fault in the kernel.
 fn copy_from_user(addr: u64, buf: &mut [u8]) -> Result<&[u8], Errno> {
-    let id = sched::current();
-    PROCESSES.lock(|processes| {
-        let running = processes.get(&id).expect("a user task has a process");
-        running.memory.read_user(addr, buf).map_err(|_| Errno::Fault)
-    })?;
+    with_running(|running| running.memory.read_user(addr, buf).map_err(|_| Errno::Fault))?;
     Ok(buf)
 }
 

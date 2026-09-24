@@ -16,13 +16,12 @@ use rustypi_core::elf;
 use rustypi_core::sched::TaskId;
 use rustypi_core::fat::{self, EntryKind, FatError};
 use crate::sched;
-use crate::synchronization::interface::Mutex;
 use crate::sys::console::{self, LendError};
 use crate::sys::fs::{self, FsError};
 use rustypi_abi::ScreenSize;
 use super::buffer::FileBuffer;
 use super::pipe::{End, PipeEnd};
-use super::{copy_from_user, read_pipe, was_killed, write_pipe, Code, Exit, Io, Process, Running, SpawnError, Stream, PROCESSES};
+use super::{copy_from_user, read_pipe, was_killed, with_running, write_pipe, Code, Exit, Io, Process, Running, SpawnError, Stream};
 
 enum Open {
     File { data: FileBuffer, position: usize },
@@ -98,12 +97,6 @@ fn errno(error: FsError) -> Errno {
         FsError::TooBig => Errno::NoMemory,
         _ => Errno::Io,
     }
-}
-
-/// Runs `f` with the running program's handles and memory.
-fn with_running<R>(f: impl FnOnce(&mut Running) -> R) -> R {
-    let id = sched::current();
-    PROCESSES.lock(|processes| f(processes.get_mut(&id).expect("a user task has a process")))
 }
 
 /// Copies UTF-8 text of at most `max` bytes, like a path, out of program memory.
