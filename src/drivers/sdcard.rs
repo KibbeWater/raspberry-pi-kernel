@@ -10,7 +10,6 @@
 //! controller at boot; they are switched over to the EMMC controller here.
 
 use core::fmt;
-use core::ptr::{read_volatile, write_volatile};
 use rustypi_core::block::{Block, BlockDevice, Lba, WritableBlockDevice, BLOCK_SIZE};
 use rustypi_core::sd;
 use crate::board::PERIPHERAL_BASE;
@@ -18,6 +17,7 @@ use crate::drivers::gpio::{set_pin_mode, set_pin_pull, Pin, PinMode, PullMode};
 use crate::drivers::mailbox::tags::{ClockId, GetClockRate};
 use crate::drivers::mailbox::{query, Mailbox, MailboxError};
 use crate::drivers::timer;
+use crate::drivers::mmio::{read, write};
 
 const EMMC_BASE: usize = PERIPHERAL_BASE + 0x30_0000;
 const BLKSIZECNT: usize = EMMC_BASE + 0x04;
@@ -215,16 +215,6 @@ impl fmt::Display for SdError {
             SdError::OutOfRange(lba) => write!(f, "{lba} out of range"),
         }
     }
-}
-
-#[inline(always)]
-fn read(addr: usize) -> u32 {
-    unsafe { read_volatile(addr as *const u32) }
-}
-
-#[inline(always)]
-fn write(addr: usize, value: u32) {
-    unsafe { write_volatile(addr as *mut u32, value) }
 }
 
 /// Waits until `done()` holds, or fails after `timeout_us`.

@@ -3,8 +3,8 @@
 //!
 //! Mirrors Linux's `bcm2835_wdt.c`.
 
-use core::ptr::{read_volatile, write_volatile};
 use crate::board::PERIPHERAL_BASE;
+use crate::drivers::mmio::{read, write};
 
 const PM_BASE: usize = PERIPHERAL_BASE + 0x10_0000;
 const PM_RSTC: usize = PM_BASE + 0x1C;
@@ -27,16 +27,6 @@ pub enum Partition {
     Boot = 0,
     /// Stay halted in low power until GPIO3 is pulled low (Linux `poweroff`).
     Halt = 63,
-}
-
-#[inline(always)]
-fn read(addr: usize) -> u32 {
-    unsafe { read_volatile(addr as *const u32) }
-}
-
-#[inline(always)]
-fn write(addr: usize, value: u32) {
-    unsafe { write_volatile(addr as *mut u32, value) }
 }
 
 /// Triggers a full chip reset through the watchdog.

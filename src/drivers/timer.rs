@@ -2,9 +2,9 @@
 //! BCM2835 system timer: a free-running 64-bit microsecond counter, plus a periodic
 //! tick interrupt on compare channel 1.
 
-use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::board::PERIPHERAL_BASE;
+use crate::drivers::mmio::{read, write};
 
 const TIMER_BASE: usize = PERIPHERAL_BASE + 0x3000;
 const TIMER_CS: usize = TIMER_BASE + 0x00;
@@ -16,16 +16,6 @@ const TIMER_C1: usize = TIMER_BASE + 0x10;
 const TIMER_CS_M1: u32 = 1 << 1;
 
 static TICK_US: AtomicU32 = AtomicU32::new(0);
-
-#[inline(always)]
-fn read(addr: usize) -> u32 {
-    unsafe { read_volatile(addr as *const u32) }
-}
-
-#[inline(always)]
-fn write(addr: usize, value: u32) {
-    unsafe { write_volatile(addr as *mut u32, value) }
-}
 
 /// Microseconds since the board was reset.
 pub fn now_us() -> u64 {

@@ -14,9 +14,9 @@ pub use rustypi_core::mailbox::{query, tags, Batch, MailboxError};
 use rustypi_core::mailbox::{Message, Transport};
 
 use core::arch::asm;
-use core::ptr::{read_volatile, write_volatile};
 use crate::board::PERIPHERAL_BASE;
 use crate::synchronization::TryLock;
+use crate::drivers::mmio::{read, write};
 
 const MBOX_BASE: usize = PERIPHERAL_BASE + 0xB880;
 /// Mailbox 0 carries firmware -> ARM replies.
@@ -37,16 +37,6 @@ const CHANNEL_PROPERTY: u32 = 8;
 /// Held while a call is in flight. It keeps other tasks from preempting a call; finding it
 /// held means an interrupt handler started a call during another, which is a bug.
 static IN_FLIGHT: TryLock<()> = TryLock::new(());
-
-#[inline(always)]
-fn read(addr: usize) -> u32 {
-    unsafe { read_volatile(addr as *const u32) }
-}
-
-#[inline(always)]
-fn write(addr: usize, value: u32) {
-    unsafe { write_volatile(addr as *mut u32, value) }
-}
 
 /// Cleans and invalidates the message's cache lines so the firmware, which doesn't see the
 /// ARM caches, reads what we wrote and we read what it wrote. Also tells the compiler the

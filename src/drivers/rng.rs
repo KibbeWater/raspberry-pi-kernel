@@ -3,8 +3,8 @@
 //!
 //! Undocumented in the datasheet; mirrors Linux's `bcm2835-rng.c`.
 
-use core::ptr::{read_volatile, write_volatile};
 use crate::board::PERIPHERAL_BASE;
+use crate::drivers::mmio::{read, write};
 
 const RNG_BASE: usize = PERIPHERAL_BASE + 0x10_4000;
 const RNG_CTRL: usize = RNG_BASE + 0x00;
@@ -19,14 +19,6 @@ const RNG_ENABLE: u32 = 1;
 const RNG_WARMUP_COUNT: u32 = 0x4_0000;
 /// INT_MASK: no interrupt; `next_u32` polls.
 const RNG_INT_OFF: u32 = 1;
-
-fn read(addr: usize) -> u32 {
-    unsafe { read_volatile(addr as *const u32) }
-}
-
-fn write(addr: usize, value: u32) {
-    unsafe { write_volatile(addr as *mut u32, value) }
-}
 
 pub fn init() {
     write(RNG_STATUS, RNG_WARMUP_COUNT);
