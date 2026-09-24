@@ -7,6 +7,7 @@ pub mod console;
 pub mod fs;
 pub mod memory;
 pub mod print;
+pub mod random;
 mod heap;
 mod panic;
 
@@ -30,11 +31,12 @@ const _: () = assert!(TICK.as_millis() * rustypi_core::sched::CPU_WINDOW as u128
 pub use rustypi_core::heap::Stats as HeapStats;
 pub use mailbox::MailboxError;
 
-/// Turns on the MMU and caches and sets up the heap. Must be the first thing
-/// `kernel_main` does.
+/// Turns on the MMU and caches, sets up the heap and starts the random number generator.
+/// Must be the first thing `kernel_main` does.
 pub fn init() {
     arch::mmu::enable();
     heap::init();
+    crate::drivers::rng::init();
 }
 
 /// Heap usage, in bytes.

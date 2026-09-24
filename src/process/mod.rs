@@ -21,7 +21,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use core::fmt;
 use core::time::Duration;
-use rustypi_abi::{encode_result, Errno, Registers, Syscall, MAX_READ, MAX_WRITE, SVC_SYSCALL};
+use rustypi_abi::{encode_result, Errno, Registers, Syscall, MAX_RANDOM, MAX_READ, MAX_WRITE, SVC_SYSCALL};
 use rustypi_abi::layout::{MAX_ARGS, PROGRAM_END, STACK_SIZE, STACK_TOP, USER_BASE};
 use rustypi_core::elf;
 use rustypi_core::paging::{Access, AddressSpace, MapError, PAGE_SIZE};
@@ -361,7 +361,21 @@ fn syscall(call: Syscall) -> Result<u64, Errno> {
         Syscall::Uptime => Ok(timer::now_us()),
         Syscall::Map { len } => map(len),
         Syscall::Read { ptr, len } => read(ptr, len),
+        Syscall::Random { ptr, len } => random(ptr, len),
     }
+}
+
+/// Fills the running program's memory at `ptr` with random bytes.
+fn random(ptr: u64, len: u64) -> Result<u64, Errno> {
+    let mut buf = [0; MAX_RANDOM];
+    let buf = &mut buf[..len.min(MAX_RANDOM as u64) as usize];
+    sys::random::fill(buf);
+    let id = sched::current();
+    PROCESSES.lock(|processes| {
+        let running = processes.get_mut(&id).expect("a user task has a process");
+        running.memory.write_user(ptr, buf).map_err(|_| Errno::Fault)
+    })?;
+    Ok(buf.len() as u64)
 }
 
 /// Copies the running program's waiting input into its memory at `ptr`, waiting for some if

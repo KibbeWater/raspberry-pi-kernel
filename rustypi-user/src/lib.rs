@@ -25,6 +25,7 @@
 
 pub mod heap;
 pub mod io;
+pub mod random;
 pub mod syscall;
 pub mod time;
 

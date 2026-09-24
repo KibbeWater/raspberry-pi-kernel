@@ -34,6 +34,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "version", args: "", description: "git commit the kernel was built from", run: version },
     Command { name: "info", args: "", description: "board, firmware, memory, temperature, EL, MMU", run: info },
     Command { name: "echo", args: "<text>", description: "reply with the text", run: echo },
+    Command { name: "random", args: "[below]", description: "a random number from the hardware generator", run: random },
     Command { name: "reboot", args: "", description: "reset the board", run: reboot },
     Command { name: "shutdown", args: "", description: "halt; pull GPIO3 low to boot again", run: shutdown },
     Command { name: "panic", args: "[msg]", description: "panic, blink the LED and reboot", run: panic },
@@ -45,6 +46,19 @@ fn uptime<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome
         return Outcome::Usage;
     }
     reply.line(LineKind::Rsp, format_args!("uptime {}s", sys::uptime().as_secs()));
+    Outcome::Done
+}
+
+fn random<'a>(_: &mut super::Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+    let value = sys::random::u64();
+    match args {
+        "" => reply.line(LineKind::Rsp, format_args!("{}", value)),
+        // Slightly biased towards small numbers for huge bounds; fine for a shell command.
+        below => match below.parse::<u64>() {
+            Ok(below) if below > 0 => reply.line(LineKind::Rsp, format_args!("{}", value % below)),
+            _ => return Outcome::Usage,
+        },
+    }
     Outcome::Done
 }
 
