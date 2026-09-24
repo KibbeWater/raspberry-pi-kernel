@@ -20,6 +20,7 @@ pub mod link;
 pub mod lock;
 pub mod mailbox;
 pub mod mbr;
+pub mod net;
 pub mod paging;
 pub mod path;
 pub mod sched;
