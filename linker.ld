@@ -18,6 +18,9 @@ SECTIONS
     .rodata :
     {
         *(.rodata .rodata.*)
+        /* Built-in user programs (process/programs.s), copied to the user window at boot. */
+        . = ALIGN(16);
+        KEEP(*(.user_image))
     }
 
     . = ALIGN(4096);
@@ -53,6 +56,14 @@ SECTIONS
         __heap_end = .;
     }
     __heap_size = __heap_end - __heap_start;
+
+    /* Backs the user window: mmu.rs maps it at 0x80000000 for user programs. One 2MB block. */
+    . = ALIGN(0x200000);
+    .user (NOLOAD) :
+    {
+        __user_phys = .;
+        . = . + 0x200000;
+    }
 
     . = ALIGN(4096);
     __end = .;

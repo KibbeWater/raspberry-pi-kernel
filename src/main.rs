@@ -8,6 +8,7 @@ mod board;
 mod commands;
 mod drivers;
 mod link;
+mod process;
 mod sched;
 mod synchronization;
 mod sys;
@@ -38,6 +39,7 @@ static LINK_STATS: IrqLock<Stats> = IrqLock::new(Stats {
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
     sys::init();
+    process::init();
     sys::delay(Duration::from_secs(1));
     Uart::init(link::BAUD);
     if let Err(error) = sys::console::init() {

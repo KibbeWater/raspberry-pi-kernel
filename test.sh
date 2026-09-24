@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs the rustypi-core unit tests on this machine. .cargo/config.toml builds for the Pi by
+# Runs the rustypi-core and rustypi-abi unit tests on this machine. .cargo/config.toml builds for the Pi by
 # default, so the host target is passed explicitly.
 #
 #   ./test.sh              all tests
@@ -8,4 +8,4 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 HOST=$(rustc -vV | sed -n 's/^host: //p')
-cargo test -p rustypi-core --target "$HOST" "$@"
+cargo test -p rustypi-core -p rustypi-abi --target "$HOST" "$@"

@@ -1,10 +1,14 @@
 // mmu.rs
-//! Identity-maps the low 2GB and turns on the MMU and caches.
+//! Identity-maps the low 2GB for the kernel, maps the user window, and turns on the MMU
+//! and caches.
 //!
 //! RAM is mapped as Normal cacheable memory and the peripherals as Device memory, so
 //! unaligned accesses to RAM are allowed from here on. Uses a 4KB granule with a 32-bit
-//! address space: one level 1 table (1GB entries) and one level 2 table (2MB blocks)
-//! for the first gigabyte.
+//! address space: one level 1 table (1GB entries), and level 2 tables (2MB blocks) for the
+//! first gigabyte and for the user window.
+//!
+//! Kernel mappings are out of reach of user programs: EL0 may neither access nor execute
+//! them. The user window is the only memory EL0 can touch, and the kernel never executes it.
 
 use core::arch::asm;
 use crate::board::{LOCAL_PERIPHERAL_BASE, PERIPHERAL_BASE};
@@ -16,6 +20,11 @@ struct Table([u64; 512]);
 
 static mut LEVEL1: Table = Table([0; 512]);
 static mut LEVEL2: Table = Table([0; 512]);
+static mut LEVEL2_USER: Table = Table([0; 512]);
+
+/// Where user programs live: one 2MB block, readable, writable and executable from EL0.
+pub const USER_BASE: usize = 0x8000_0000;
+pub const USER_SIZE: usize = BLOCK_2M;
 
 // Descriptor bits.
 const DESC_BLOCK: u64 = 0b01;
@@ -25,9 +34,14 @@ const ATTR_DEVICE: u64 = 1 << 2; // MAIR index 1
 const ATTR_NORMAL_UNCACHED: u64 = 2 << 2; // MAIR index 2
 const INNER_SHAREABLE: u64 = 3 << 8;
 const ACCESS_FLAG: u64 = 1 << 10;
-const EXECUTE_NEVER: u64 = 3 << 53; // PXN | UXN
+/// AP[1]: EL0 may access it. Without it, only EL1 can.
+const EL0_ACCESS: u64 = 1 << 6;
+const PRIVILEGED_EXECUTE_NEVER: u64 = 1 << 53; // PXN
+const USER_EXECUTE_NEVER: u64 = 1 << 54; // UXN
+const EXECUTE_NEVER: u64 = PRIVILEGED_EXECUTE_NEVER | USER_EXECUTE_NEVER;
 
-const NORMAL: u64 = DESC_BLOCK | ATTR_NORMAL | INNER_SHAREABLE | ACCESS_FLAG;
+const NORMAL: u64 = DESC_BLOCK | ATTR_NORMAL | INNER_SHAREABLE | ACCESS_FLAG | USER_EXECUTE_NEVER;
+const USER: u64 = DESC_BLOCK | ATTR_NORMAL | INNER_SHAREABLE | ACCESS_FLAG | EL0_ACCESS | PRIVILEGED_EXECUTE_NEVER;
 const DEVICE: u64 = DESC_BLOCK | ATTR_DEVICE | ACCESS_FLAG | EXECUTE_NEVER;
 const NORMAL_UNCACHED: u64 = DESC_BLOCK | ATTR_NORMAL_UNCACHED | INNER_SHAREABLE | ACCESS_FLAG | EXECUTE_NEVER;
 
@@ -49,6 +63,9 @@ const SCTLR_ENABLE: u64 = 1 << 0 | 1 << 2 | 1 << 12;
 /// Must run before anything that might make an unaligned access: until then all
 /// memory is Device memory, where unaligned accesses fault.
 pub fn enable() {
+    extern "C" {
+        static __user_phys: u8;
+    }
     unsafe {
         let level2 = &raw mut LEVEL2;
         for (i, entry) in (*level2).0.iter_mut().enumerate() {
@@ -61,6 +78,10 @@ pub fn enable() {
         (*level1).0[0] = level2 as u64 | DESC_TABLE;
         // ARM local peripherals (core timers, mailboxes, interrupt routing).
         (*level1).0[1] = LOCAL_PERIPHERAL_BASE as u64 | DEVICE;
+
+        let user = &raw mut LEVEL2_USER;
+        (*user).0[0] = &raw const __user_phys as u64 | USER;
+        (*level1).0[USER_BASE >> 30] = user as u64 | DESC_TABLE;
 
         asm!(
             "msr mair_el1, {mair}",
@@ -120,6 +141,22 @@ pub fn make_uncached(start: usize, len: usize) {
             asm!("dc civac, {}", in(reg) line, options(nostack, preserves_flags));
         }
         asm!("dsb sy", options(nostack));
+    }
+}
+
+/// Makes code just written to `start..start + len` safe to execute: cleans it from the data
+/// cache to where instruction fetches see it, and drops stale instruction cache lines.
+pub fn sync_instruction_cache(start: usize, len: usize) {
+    let lines = (start & !(CACHE_LINE - 1)..start + len).step_by(CACHE_LINE);
+    unsafe {
+        for line in lines.clone() {
+            asm!("dc cvau, {}", in(reg) line, options(nostack, preserves_flags));
+        }
+        asm!("dsb ish", options(nostack));
+        for line in lines {
+            asm!("ic ivau, {}", in(reg) line, options(nostack, preserves_flags));
+        }
+        asm!("dsb ish", "isb", options(nostack));
     }
 }
 

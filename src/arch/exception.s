@@ -6,7 +6,7 @@
 // \handler(ctx: *mut ExceptionContext, kind: u64) -> *mut ExceptionContext.
 .macro VECTOR handler, kind
 .balign 0x80
-    sub     sp, sp, #16 * 17
+    sub     sp, sp, #16 * 18
     stp     x0, x1, [sp, #16 * 0]
     stp     x2, x3, [sp, #16 * 1]
     stp     x4, x5, [sp, #16 * 2]
@@ -27,6 +27,8 @@
     mrs     x3, esr_el1
     stp     x30, x1, [sp, #16 * 15]
     stp     x2, x3, [sp, #16 * 16]
+    mrs     x4, sp_el0
+    str     x4, [sp, #16 * 17]
     mov     x0, sp
     mov     x1, #\kind
     bl      \handler
@@ -48,17 +50,20 @@ exception_vectors:
     VECTOR exception_irq, 5
     VECTOR exception_unexpected, 6
     VECTOR exception_unexpected, 7
-    // Lower EL, AArch64 and AArch32: no user space yet.
-    VECTOR exception_unexpected, 8
-    VECTOR exception_unexpected, 9
+    // Lower EL, AArch64: user programs. They arrive on the kernel stack of their task.
+    VECTOR exception_user_sync, 8
+    VECTOR exception_irq, 9
     VECTOR exception_unexpected, 10
     VECTOR exception_unexpected, 11
+    // Lower EL, AArch32: never used.
     VECTOR exception_unexpected, 12
     VECTOR exception_unexpected, 13
     VECTOR exception_unexpected, 14
     VECTOR exception_unexpected, 15
 
 exception_restore:
+    ldr     x19, [sp, #16 * 17]
+    msr     sp_el0, x19
     ldp     x19, x20, [sp, #16 * 16]
     msr     spsr_el1, x19
     ldp     x30, x20, [sp, #16 * 15]
@@ -78,5 +83,5 @@ exception_restore:
     ldp     x24, x25, [sp, #16 * 12]
     ldp     x26, x27, [sp, #16 * 13]
     ldp     x28, x29, [sp, #16 * 14]
-    add     sp, sp, #16 * 17
+    add     sp, sp, #16 * 18
     eret

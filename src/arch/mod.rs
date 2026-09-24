@@ -22,6 +22,12 @@ pub fn irq_enable() {
     unsafe { asm!("msr daifclr, #2", options(nostack)) };
 }
 
+/// Masks IRQs. Also a compiler barrier.
+#[inline(always)]
+pub fn irq_disable() {
+    unsafe { asm!("msr daifset, #2", options(nostack)) };
+}
+
 /// Whether IRQs are unmasked, i.e. this is task code rather than an exception handler or a
 /// masked section.
 pub fn irqs_enabled() -> bool {

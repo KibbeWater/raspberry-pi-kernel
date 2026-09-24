@@ -21,7 +21,7 @@ impl Action<'_> {
             Action::Shutdown => sys::shutdown(),
             Action::Panic(message) => panic!("{}", message),
             Action::Fault => {
-                // Nothing is mapped above 2GB, so this raises a data abort.
+                // Nothing is mapped at 0xDEAD0000, so this raises a data abort.
                 let value = unsafe { core::ptr::read_volatile(0xDEAD_0000 as *const u32) };
                 panic!("read {:#x} from unmapped memory, expected a fault", value);
             }

@@ -1,5 +1,6 @@
 // sched.rs
-//! Kernel tasks: each has its own stack and runs at EL1 in the kernel's address space.
+//! Tasks: each has its own kernel stack. Kernel tasks run at EL1; user tasks run a program
+//! at EL0 (see `process`) and are at EL1, on that stack, only while handling an exception.
 //!
 //! A task that isn't running is an `ExceptionContext` saved on its stack by the exception
 //! entry code. Switching tasks is returning a different context from the exception handler:
@@ -36,6 +37,8 @@ const STACK_FILL: u8 = 0x5A;
 const CANARY: [u8; 16] = *b"RustyPI  canary!";
 /// EL1h (the task uses SP_EL1) with all interrupts unmasked.
 const SPSR_EL1H: u64 = 0b0101;
+/// EL0 (the program uses SP_EL0) with all interrupts unmasked.
+const SPSR_EL0T: u64 = 0b0000;
 
 struct Task {
     /// `None` for the boot task, which runs on the stack `linker.ld` reserves.
@@ -66,7 +69,7 @@ pub fn init(name: &'static str) {
             tasks: vec![Some(Task { stack: None, context: core::ptr::null_mut() })],
         });
     });
-    spawn_task("idle", Box::new(idle), true);
+    spawn_kernel("idle", Box::new(idle), true);
 }
 
 fn idle() {
@@ -77,29 +80,49 @@ fn idle() {
 
 /// Starts a task running `entry`. It is removed once `entry` returns.
 pub fn spawn(name: &'static str, entry: impl FnOnce() + 'static) -> TaskId {
-    spawn_task(name, Box::new(entry), false)
+    spawn_kernel(name, Box::new(entry), false)
 }
 
-fn spawn_task(name: &'static str, entry: Box<dyn FnOnce()>, idle: bool) -> TaskId {
-    let mut stack = vec![STACK_FILL; STACK_SIZE].into_boxed_slice();
-    stack[..CANARY.len()].copy_from_slice(&CANARY);
-
-    // The first switch to the task "returns" from an exception into `task_entry`.
-    let top = (stack.as_mut_ptr() as usize + STACK_SIZE) & !15;
-    let context = (top - size_of::<ExceptionContext>()) as *mut ExceptionContext;
+fn spawn_kernel(name: &'static str, entry: Box<dyn FnOnce()>, idle: bool) -> TaskId {
     // A thin pointer to the closure, to pass in a register.
     let entry = Box::into_raw(Box::new(entry));
     let mut gpr = [0; 30];
     gpr[0] = entry as u64;
-    unsafe {
-        context.write(ExceptionContext {
-            gpr,
-            lr: 0,
-            elr: task_entry as usize as u64,
-            spsr: SPSR_EL1H,
-            esr: 0,
-        });
-    }
+    spawn_task(name, idle, ExceptionContext {
+        gpr,
+        lr: 0,
+        elr: task_entry as usize as u64,
+        spsr: SPSR_EL1H,
+        esr: 0,
+        sp_el0: 0,
+        _reserved: 0,
+    })
+}
+
+/// Starts a task that runs user code at `entry` on the user stack `stack_top`, both user
+/// addresses. It leaves only through `exit`, called on its behalf by `process`.
+pub fn spawn_user(name: &'static str, entry: usize, stack_top: usize) -> TaskId {
+    spawn_task(name, false, ExceptionContext {
+        gpr: [0; 30],
+        lr: 0,
+        elr: entry as u64,
+        spsr: SPSR_EL0T,
+        esr: 0,
+        sp_el0: stack_top as u64,
+        _reserved: 0,
+    })
+}
+
+/// Adds a task whose first switch "returns" from an exception into `start`.
+fn spawn_task(name: &'static str, idle: bool, start: ExceptionContext) -> TaskId {
+    let mut stack = vec![STACK_FILL; STACK_SIZE].into_boxed_slice();
+    stack[..CANARY.len()].copy_from_slice(&CANARY);
+
+    // Once the first eret pops this context, SP_EL1 is the top of the stack, which is where
+    // a user task's exceptions from EL0 will then land.
+    let top = (stack.as_mut_ptr() as usize + STACK_SIZE) & !15;
+    let context = (top - size_of::<ExceptionContext>()) as *mut ExceptionContext;
+    unsafe { context.write(start) };
 
     SCHEDULER.lock(|scheduler| {
         let scheduler = scheduler.as_mut().expect("sched::init first");
@@ -113,6 +136,11 @@ fn spawn_task(name: &'static str, entry: Box<dyn FnOnce()>, idle: bool) -> TaskI
 extern "C" fn task_entry(entry: *mut Box<dyn FnOnce()>) -> ! {
     let entry = unsafe { Box::from_raw(entry) };
     entry();
+    exit()
+}
+
+/// Ends the running task. Its stack is freed on a later switch.
+pub fn exit() -> ! {
     SCHEDULER.lock(|scheduler| {
         if let Some(scheduler) = scheduler {
             scheduler.queue.finish_current();

@@ -212,6 +212,25 @@ impl<W: Write> Write for FrameWriter<'_, W> {
 /// Characters that can't appear inside a frame.
 const FRAME_BREAKING: [char; 3] = ['$', '\r', '\n'];
 
+/// Turns untrusted bytes (a user program's output) into console text that can't be mistaken
+/// for frames: invalid UTF-8 and every `$` come out as `?`. Calls `emit` with each piece.
+pub fn plain_text(bytes: &[u8], mut emit: impl FnMut(&str)) {
+    for chunk in bytes.utf8_chunks() {
+        for piece in chunk.valid().split_inclusive('$') {
+            match piece.strip_suffix('$') {
+                Some(text) => {
+                    emit(text);
+                    emit("?");
+                }
+                None => emit(piece),
+            }
+        }
+        if !chunk.invalid().is_empty() {
+            emit("?");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +328,27 @@ mod tests {
 
         // It recovers for the next frame.
         assert_eq!(feed(&mut receiver, frame("PING", "2").as_bytes()), ["PING|2"]);
+    }
+
+    fn plain(bytes: &[u8]) -> String {
+        let mut out = String::new();
+        plain_text(bytes, |piece| out.push_str(piece));
+        out
+    }
+
+    #[test]
+    fn plain_text_passes_ordinary_text_through() {
+        assert_eq!(plain(b"hello\n\tworld\r\n"), "hello\n\tworld\r\n");
+        assert_eq!(plain("h\u{e9}j".as_bytes()), "h\u{e9}j");
+    }
+
+    #[test]
+    fn plain_text_defuses_frames_and_bad_utf8() {
+        assert_eq!(plain(b"$RSP,1,0,fake*00\n"), "?RSP,1,0,fake*00\n");
+        assert_eq!(plain(b"a$$b"), "a??b");
+        assert_eq!(plain(b"ok\xFF\xFEend"), "ok??end");
+        // A truncated multi-byte character is one invalid run.
+        assert_eq!(plain(&"\u{e9}".as_bytes()[..1]), "?");
     }
 
     #[test]

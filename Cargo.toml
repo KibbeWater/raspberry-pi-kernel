@@ -17,7 +17,8 @@ doctest = false
 bench = false
 
 [dependencies]
+rustypi-abi = { path = "rustypi-abi" }
 rustypi-core = { path = "rustypi-core" }
 
 [workspace]
-members = ["rustypi-core"]
+members = ["rustypi-abi", "rustypi-core"]

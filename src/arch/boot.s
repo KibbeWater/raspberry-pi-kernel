@@ -33,8 +33,9 @@ _boot:
     eret
 
 .L_el1:
-    // Don't trap FP/SIMD at EL1 either.
-    mov     x0, #(3 << 20)
+    // Don't trap FP/SIMD at EL1 either, but do at EL0: user programs are softfloat, and
+    // their FP registers aren't saved across task switches.
+    mov     x0, #(1 << 20)
     msr     cpacr_el1, x0
 
     // Stack grows down from the top of the reserved region.

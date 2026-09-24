@@ -7,6 +7,7 @@
 
 mod led;
 mod memory;
+mod programs;
 mod screen;
 mod storage;
 mod system;
@@ -61,6 +62,7 @@ const GROUPS: &[&[Command]] = &[
     screen::COMMANDS,
     storage::COMMANDS,
     tasks::COMMANDS,
+    programs::COMMANDS,
 ];
 
 fn commands() -> impl Iterator<Item = &'static Command> {

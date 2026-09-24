@@ -19,3 +19,4 @@ pub mod mbr;
 pub mod sched;
 pub mod sd;
 pub mod session;
+pub mod user;
