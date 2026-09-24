@@ -1,12 +1,14 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 mod arch;
 mod board;
 mod commands;
 mod drivers;
 mod link;
-#[allow(dead_code)] // Not used yet; kept for when shared state needs locking.
+mod session;
 mod synchronization;
 mod sys;
 
@@ -14,6 +16,7 @@ use core::time::Duration;
 use commands::Shell;
 use drivers::uart::Uart;
 use link::{Link, Stats};
+use session::Session;
 
 /// Name announced in `HELLO` frames.
 const NAME: &str = "RustyPI";
@@ -35,13 +38,21 @@ pub extern "C" fn kernel_main() -> ! {
     // Received bytes are queued by the UART interrupt, so the loop can sleep between
     // wake-ups (UART input or the timer tick) without losing any.
     let mut link = Link::new();
+    let mut session = Session::new();
     sys::enable_interrupts();
     let mut last_stat = sys::uptime();
     loop {
         link.poll(|kind, payload| match kind {
             "PING" => link::send("PONG", payload),
-            "HELLO" => link::send("HELLO", NAME),
-            "MSG" => shell.handle(payload),
+            "HELLO" => {
+                session.reset();
+                link::send("HELLO", NAME);
+            }
+            "MSG" => {
+                if let Some(action) = session.handle(payload, |text, reply| shell.handle(text, reply)) {
+                    action.perform();
+                }
+            }
             _ => link::send_fmt("ERR", format_args!("unknown kind {}", kind)),
         });
 

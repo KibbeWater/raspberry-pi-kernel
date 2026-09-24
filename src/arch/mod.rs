@@ -28,6 +28,20 @@ pub fn irq_disable() {
     unsafe { asm!("msr daifset, #2", options(nostack)) };
 }
 
+/// Masks IRQs and returns the previous mask state, for `irq_restore`.
+#[inline(always)]
+pub fn irq_save() -> u64 {
+    let daif: u64;
+    unsafe { asm!("mrs {}, daif", "msr daifset, #2", out(reg) daif, options(nostack)) };
+    daif
+}
+
+/// Restores the IRQ mask state returned by `irq_save`.
+#[inline(always)]
+pub fn irq_restore(daif: u64) {
+    unsafe { asm!("msr daif, {}", in(reg) daif, options(nostack)) };
+}
+
 /// Sleeps until the next interrupt, unless `ready()` already holds.
 ///
 /// IRQs are masked while checking, so an interrupt that arrives between the check and

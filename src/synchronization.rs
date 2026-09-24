@@ -11,10 +11,7 @@
 //!   - <https://doc.rust-lang.org/std/cell/index.html>
 
 use core::cell::UnsafeCell;
-
-//--------------------------------------------------------------------------------------------------
-// Public Definitions
-//--------------------------------------------------------------------------------------------------
+use crate::arch;
 
 /// Synchronization interfaces.
 pub mod interface {
@@ -26,32 +23,26 @@ pub mod interface {
         type Data;
 
         /// Locks the mutex and grants the closure temporary mutable access to the wrapped data.
-        fn lock<'a, R>(&'a self, f: impl FnOnce(&'a mut Self::Data) -> R) -> R;
+        fn lock<R>(&self, f: impl FnOnce(&mut Self::Data) -> R) -> R;
     }
 }
 
-/// A pseudo-lock for teaching purposes.
+/// A lock that masks IRQs while held, so interrupt handlers can't observe or modify the data
+/// halfway through an update.
 ///
-/// In contrast to a real Mutex implementation, does not protect against concurrent access from
-/// other cores to the contained data. This part is preserved for later lessons.
-///
-/// The lock will only be used as long as it is safe to do so, i.e. as long as the kernel is
-/// executing single-threaded, aka only running on a single core with interrupts disabled.
-pub struct NullLock<T>
+/// Only sound while the kernel runs on a single core; other cores would need a spinlock on
+/// top. Must not be locked again from inside its own closure.
+pub struct IrqLock<T>
 where
     T: ?Sized,
 {
     data: UnsafeCell<T>,
 }
 
-//--------------------------------------------------------------------------------------------------
-// Public Code
-//--------------------------------------------------------------------------------------------------
+unsafe impl<T> Send for IrqLock<T> where T: ?Sized + Send {}
+unsafe impl<T> Sync for IrqLock<T> where T: ?Sized + Send {}
 
-unsafe impl<T> Send for NullLock<T> where T: ?Sized + Send {}
-unsafe impl<T> Sync for NullLock<T> where T: ?Sized + Send {}
-
-impl<T> NullLock<T> {
+impl<T> IrqLock<T> {
     /// Create an instance.
     pub const fn new(data: T) -> Self {
         Self {
@@ -60,18 +51,14 @@ impl<T> NullLock<T> {
     }
 }
 
-//------------------------------------------------------------------------------
-// OS Interface Code
-//------------------------------------------------------------------------------
-
-impl<T> interface::Mutex for NullLock<T> {
+impl<T> interface::Mutex for IrqLock<T> {
     type Data = T;
 
-    fn lock<'a, R>(&'a self, f: impl FnOnce(&'a mut Self::Data) -> R) -> R {
-        // In a real lock, there would be code encapsulating this line that ensures that this
-        // mutable reference will ever only be given out once at a time.
-        let data = unsafe { &mut *self.data.get() };
-
-        f(data)
+    fn lock<R>(&self, f: impl FnOnce(&mut Self::Data) -> R) -> R {
+        let saved = arch::irq_save();
+        // With IRQs masked on the only running core, nothing else can reach the data.
+        let result = f(unsafe { &mut *self.data.get() });
+        arch::irq_restore(saved);
+        result
     }
 }

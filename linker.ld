@@ -1,7 +1,7 @@
 ENTRY(_boot)
 
 STACK_SIZE = 0x4000;
-HEAP_SIZE = 0x100000;
+HEAP_SIZE = 0x1000000; /* 16MB; NOLOAD, so it costs nothing in kernel8.img */
 
 SECTIONS
 {

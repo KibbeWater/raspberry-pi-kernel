@@ -4,6 +4,7 @@
 //! Code outside `drivers` should go through here rather than poking hardware.
 
 pub mod print;
+mod heap;
 mod panic;
 
 use core::time::Duration;
@@ -21,9 +22,18 @@ const TICK: Duration = Duration::from_millis(100);
 const TAG_BOARD_REVISION: u32 = 0x0001_0002;
 const TAG_TEMPERATURE: u32 = 0x0003_0006;
 
-/// Turns on the MMU and caches. Must be the first thing `kernel_main` does.
+pub use heap::Stats as HeapStats;
+
+/// Turns on the MMU and caches and sets up the heap. Must be the first thing
+/// `kernel_main` does.
 pub fn init() {
     arch::mmu::enable();
+    heap::init();
+}
+
+/// Heap usage, in bytes.
+pub fn heap_stats() -> HeapStats {
+    heap::stats()
 }
 
 /// Starts interrupt-driven UART receive and the timer tick, then unmasks IRQs.

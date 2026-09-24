@@ -17,7 +17,7 @@
 use core::fmt::{self, Write};
 use crate::drivers::uart::Uart;
 
-/// Link speed. The Uno receives with SoftwareSerial, which is unreliable above this.
+/// Link speed. Must match LINK_BAUD in the Arduino sketch.
 pub const BAUD: u32 = 38_400;
 
 /// Longest line (excluding the `\n`) we accept. Keep in sync with the Arduino sketch.
