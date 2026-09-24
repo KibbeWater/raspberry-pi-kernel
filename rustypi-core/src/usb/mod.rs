@@ -1,8 +1,10 @@
-// usb.rs
+// usb/mod.rs
 //! The USB protocol, independent of any host controller: control requests, the descriptors
 //! devices describe themselves with, hub port status, and boot protocol keyboard reports.
 //! See the USB 2.0 specification (chapters 9 and 11) and the HID 1.11 specification
 //! (appendix B).
+
+pub mod tree;
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -105,6 +107,8 @@ const SET_PROTOCOL: u8 = 0x0B;
 pub struct PortFeature(pub u16);
 
 impl PortFeature {
+    /// Only cleared, to disable a port.
+    pub const ENABLE: PortFeature = PortFeature(1);
     pub const RESET: PortFeature = PortFeature(4);
     pub const POWER: PortFeature = PortFeature(8);
     pub const CONNECTION_CHANGE: PortFeature = PortFeature(16);
