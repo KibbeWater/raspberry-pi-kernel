@@ -26,6 +26,7 @@
 pub mod fs;
 pub mod heap;
 pub mod io;
+pub mod process;
 pub mod random;
 pub mod syscall;
 pub mod time;
@@ -74,6 +75,24 @@ impl<T: Termination, E: fmt::Debug> Termination for Result<T, E> {
                 1
             }
         }
+    }
+}
+
+/// A handle from the kernel, closed when dropped.
+pub(crate) struct Handle(pub(crate) u64);
+
+impl Handle {
+    /// Gives up the handle without closing it, for calls that close it themselves.
+    pub(crate) fn into_raw(self) -> u64 {
+        let handle = self.0;
+        core::mem::forget(self);
+        handle
+    }
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        let _ = syscall::call(Syscall::Close { handle: self.0 });
     }
 }
 

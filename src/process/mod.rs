@@ -12,7 +12,7 @@
 //! it can sleep, block or be preempted like any kernel task, and its registers wait in the
 //! saved `ExceptionContext` until it returns.
 
-mod files;
+mod handles;
 mod programs;
 
 pub use programs::{Program, PROGRAMS};
@@ -150,8 +150,10 @@ struct Running {
     heap_end: u64,
     /// Input sent to it and not read yet.
     input: VecDeque<u8>,
-    /// Files and directories it has open.
-    handles: files::Handles,
+    /// Files, directories and children it has open.
+    handles: handles::Handles,
+    /// The child it is waiting on, which gets its input meanwhile.
+    waiting_for: Option<TaskId>,
 }
 
 /// Most bytes of unread input a program can have waiting.
@@ -169,6 +171,11 @@ pub struct Process {
 impl Process {
     pub fn id(&self) -> TaskId {
         self.id
+    }
+
+    /// How it ended, if it has.
+    pub fn exit(&self) -> Option<Exit> {
+        self.exit.lock(|exit| *exit)
     }
 
     /// Waits for the program to end.
@@ -234,7 +241,8 @@ pub fn spawn(name: &str, code: Code, args: &str) -> Result<Process, SpawnError> 
         killed: false,
         heap_end: program_end.next_multiple_of(PAGE_SIZE as u64),
         input: VecDeque::new(),
-        handles: files::Handles::new(),
+        handles: handles::Handles::new(),
+        waiting_for: None,
     };
     // Registered under the lock, so the program can't make a system call before it is known.
     let id = PROCESSES.lock(|processes| {
@@ -266,10 +274,18 @@ impl fmt::Display for InputError {
     }
 }
 
-/// Gives the program running as task `id` a line of input, for its `Read`s.
+/// Gives the program running as task `id` a line of input, for its `Read`s. While it waits on
+/// a child, the child gets it instead (or the child's child, and so on).
 pub fn send_line(id: TaskId, line: &str) -> Result<(), InputError> {
     PROCESSES.lock(|processes| {
-        let running = processes.get_mut(&id).ok_or(InputError::NotAProgram)?;
+        let mut target = id;
+        while let Some(child) = processes.get(&target).and_then(|running| running.waiting_for) {
+            if !processes.contains_key(&child) {
+                break;
+            }
+            target = child;
+        }
+        let running = processes.get_mut(&target).ok_or(InputError::NotAProgram)?;
         if running.input.len() + line.len() + 1 > MAX_INPUT {
             return Err(InputError::Full);
         }
@@ -365,11 +381,13 @@ fn syscall(call: Syscall) -> Result<u64, Errno> {
         Syscall::Uptime => Ok(timer::now_us()),
         Syscall::Map { len } => map(len),
         Syscall::Read { handle: INPUT, ptr, len } => read_input(ptr, len),
-        Syscall::Read { handle, ptr, len } => files::read(handle, ptr, len),
-        Syscall::Open { path, len } => files::open(path, len),
-        Syscall::OpenDir { path, len } => files::open_dir(path, len),
-        Syscall::ReadDir { handle, entry } => files::read_dir(handle, entry),
-        Syscall::Close { handle } => files::close(handle),
+        Syscall::Read { handle, ptr, len } => handles::read(handle, ptr, len),
+        Syscall::Open { path, len } => handles::open(path, len),
+        Syscall::OpenDir { path, len } => handles::open_dir(path, len),
+        Syscall::ReadDir { handle, entry } => handles::read_dir(handle, entry),
+        Syscall::Close { handle } => handles::close(handle),
+        Syscall::Spawn { path, path_len, args, args_len } => handles::spawn(path, path_len, args, args_len),
+        Syscall::Wait { handle } => handles::wait(handle),
         Syscall::Random { ptr, len } => random(ptr, len),
     }
 }

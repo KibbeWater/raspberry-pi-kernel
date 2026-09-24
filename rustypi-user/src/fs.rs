@@ -6,18 +6,9 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use rustypi_abi::{Errno, Syscall, MAX_READ};
-use crate::syscall;
+use crate::{syscall, Handle};
 
 pub use rustypi_abi::DirEntry;
-
-/// Closes the handle when dropped.
-struct Handle(u64);
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        let _ = syscall::call(Syscall::Close { handle: self.0 });
-    }
-}
 
 /// A file open for reading.
 pub struct File(Handle);

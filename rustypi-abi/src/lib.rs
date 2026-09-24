@@ -49,7 +49,8 @@ pub const MAX_PATH: usize = 256;
 /// Biggest file `Open` takes, in bytes: the kernel reads it whole.
 pub const MAX_FILE: usize = 4 * 1024 * 1024;
 
-/// Most handles a program can have open at once, besides `INPUT`.
+/// Most handles a program can have open at once (files, directories and children), besides
+/// `INPUT`.
 pub const MAX_HANDLES: usize = 16;
 
 /// The handle every program starts with: what the user types while it runs in the
@@ -72,6 +73,8 @@ pub enum Number {
     OpenDir = 9,
     ReadDir = 10,
     Close = 11,
+    Spawn = 12,
+    Wait = 13,
 }
 
 impl Number {
@@ -89,6 +92,8 @@ impl Number {
             9 => Number::OpenDir,
             10 => Number::ReadDir,
             11 => Number::Close,
+            12 => Number::Spawn,
+            13 => Number::Wait,
             _ => return None,
         })
     }
@@ -126,8 +131,16 @@ pub enum Syscall {
     /// Writes the directory's next [`DirEntry`] to `entry`. Returns 1, or 0 once all have
     /// been read.
     ReadDir { handle: u64, entry: u64 },
-    /// Closes a handle from `Open` or `OpenDir`. Exiting closes them all.
+    /// Closes a handle from `Open`, `OpenDir` or `Spawn` (the child runs on, unwatched).
+    /// Exiting closes them all.
     Close { handle: u64 },
+    /// Starts the program in the file at `path..path + path_len`, with the arguments at
+    /// `args..args + args_len`. Returns a handle for `Wait`. While this program waits on it,
+    /// input sent to this program goes to the child.
+    Spawn { path: u64, path_len: u64, args: u64, args_len: u64 },
+    /// Waits for a child from `Spawn` to end, and closes its handle. Returns its
+    /// [`ExitStatus`], encoded.
+    Wait { handle: u64 },
 }
 
 /// The registers a system call is made with.
@@ -154,6 +167,8 @@ impl Syscall {
             Syscall::OpenDir { .. } => Number::OpenDir,
             Syscall::ReadDir { .. } => Number::ReadDir,
             Syscall::Close { .. } => Number::Close,
+            Syscall::Spawn { .. } => Number::Spawn,
+            Syscall::Wait { .. } => Number::Wait,
         }
     }
 
@@ -165,7 +180,8 @@ impl Syscall {
             Syscall::Read { handle, ptr, len } => [handle, ptr, len, 0, 0, 0],
             Syscall::Open { path, len } | Syscall::OpenDir { path, len } => [path, len, 0, 0, 0, 0],
             Syscall::ReadDir { handle, entry } => [handle, entry, 0, 0, 0, 0],
-            Syscall::Close { handle } => [handle, 0, 0, 0, 0, 0],
+            Syscall::Close { handle } | Syscall::Wait { handle } => [handle, 0, 0, 0, 0, 0],
+            Syscall::Spawn { path, path_len, args, args_len } => [path, path_len, args, args_len, 0, 0],
             Syscall::Sleep { micros } => [micros, 0, 0, 0, 0, 0],
             Syscall::Map { len } => [len, 0, 0, 0, 0, 0],
             Syscall::Yield | Syscall::Uptime => [0; 6],
@@ -176,7 +192,7 @@ impl Syscall {
     /// Unknown numbers are `NoSys`; arguments out of range for their type are `Invalid`.
     /// Arguments a call doesn't take are ignored.
     pub fn decode(registers: Registers) -> Result<Syscall, Errno> {
-        let [a0, a1, a2, ..] = registers.args;
+        let [a0, a1, a2, a3, ..] = registers.args;
         let number = Number::from_raw(registers.number).ok_or(Errno::NoSys)?;
         Ok(match number {
             Number::Exit => {
@@ -194,6 +210,8 @@ impl Syscall {
             Number::OpenDir => Syscall::OpenDir { path: a0, len: a1 },
             Number::ReadDir => Syscall::ReadDir { handle: a0, entry: a1 },
             Number::Close => Syscall::Close { handle: a0 },
+            Number::Spawn => Syscall::Spawn { path: a0, path_len: a1, args: a2, args_len: a3 },
+            Number::Wait => Syscall::Wait { handle: a0 },
         })
     }
 }
@@ -221,6 +239,8 @@ pub enum Errno {
     TooMany,
     /// The SD card or its filesystem failed.
     Io,
+    /// Not a program RustyPI can run.
+    NotExecutable,
     /// A code this version of the ABI doesn't know, from a newer kernel.
     Unknown,
 }
@@ -239,6 +259,7 @@ impl Errno {
             Errno::BadHandle => 8,
             Errno::TooMany => 9,
             Errno::Io => 10,
+            Errno::NotExecutable => 11,
             Errno::Unknown => 4095,
         }
     }
@@ -255,7 +276,43 @@ impl Errno {
             8 => Errno::BadHandle,
             9 => Errno::TooMany,
             10 => Errno::Io,
+            11 => Errno::NotExecutable,
             _ => Errno::Unknown,
+        }
+    }
+}
+
+/// How a program ended, as `Wait` reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitStatus {
+    /// It exited with this code.
+    Code(i32),
+    /// It faulted, and the kernel killed it.
+    Crashed,
+    /// It was killed.
+    Killed,
+}
+
+const STATUS_CODE: u64 = 0;
+const STATUS_CRASHED: u64 = 1;
+const STATUS_KILLED: u64 = 2;
+
+impl ExitStatus {
+    /// Into a system call result: the kind above bit 32, a code's bits below.
+    pub const fn encode(self) -> u64 {
+        match self {
+            ExitStatus::Code(code) => STATUS_CODE << 32 | code as u32 as u64,
+            ExitStatus::Crashed => STATUS_CRASHED << 32,
+            ExitStatus::Killed => STATUS_KILLED << 32,
+        }
+    }
+
+    pub const fn decode(value: u64) -> Option<ExitStatus> {
+        match value >> 32 {
+            STATUS_CODE => Some(ExitStatus::Code(value as u32 as i32)),
+            STATUS_CRASHED if value as u32 == 0 => Some(ExitStatus::Crashed),
+            STATUS_KILLED if value as u32 == 0 => Some(ExitStatus::Killed),
+            _ => None,
         }
     }
 }
@@ -337,7 +394,7 @@ pub const fn decode_result(x0: u64) -> Result<u64, Errno> {
 mod tests {
     use super::*;
 
-    const ALL: [Syscall; 13] = [
+    const ALL: [Syscall; 15] = [
         Syscall::Exit { code: 0 },
         Syscall::Exit { code: -7 },
         Syscall::Write { ptr: 0x8000_0000, len: 12 },
@@ -351,6 +408,8 @@ mod tests {
         Syscall::OpenDir { path: 0x8000_3000, len: 4 },
         Syscall::ReadDir { handle: 2, entry: 0x8000_4000 },
         Syscall::Close { handle: 2 },
+        Syscall::Spawn { path: 0x8000_3000, path_len: 9, args: 0x8000_3100, args_len: 3 },
+        Syscall::Wait { handle: 4 },
     ];
 
     #[test]
@@ -402,6 +461,7 @@ mod tests {
             Errno::BadHandle,
             Errno::TooMany,
             Errno::Io,
+            Errno::NotExecutable,
         ]
         .map(Err);
         for result in [Ok(0), Ok(42), Ok(MAX_RESULT)].into_iter().chain(errors) {
@@ -414,6 +474,15 @@ mod tests {
     fn unknown_error_codes_decode_as_unknown() {
         assert_eq!(decode_result(-77i64 as u64), Err(Errno::Unknown));
         assert_eq!(decode_result(u64::MAX - MAX_RESULT), Err(Errno::Unknown)); // i64::MIN
+    }
+
+    #[test]
+    fn exit_statuses_survive_encoding_as_results() {
+        for status in [ExitStatus::Code(0), ExitStatus::Code(-1), ExitStatus::Code(i32::MAX), ExitStatus::Crashed, ExitStatus::Killed] {
+            assert_eq!(decode_result(encode_result(Ok(status.encode()))).map(ExitStatus::decode), Ok(Some(status)));
+        }
+        assert_eq!(ExitStatus::decode(3 << 32), None);
+        assert_eq!(ExitStatus::decode(STATUS_CRASHED << 32 | 5), None);
     }
 
     #[test]
