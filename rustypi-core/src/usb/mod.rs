@@ -454,6 +454,7 @@ pub struct KeyboardReport {
 }
 
 /// Modifier bits: left control, shift, alt, GUI, then the right ones.
+const CTRL: u8 = 1 << 0 | 1 << 4;
 const SHIFT: u8 = 1 << 1 | 1 << 5;
 const RIGHT_ALT: u8 = 1 << 6;
 /// A key usage meaning "too many keys held to tell".
@@ -473,7 +474,11 @@ impl KeyboardReport {
 
     /// The modifiers held, as a layout needs them.
     pub fn held(&self) -> Modifiers {
-        Modifiers { shift: self.modifiers & SHIFT != 0, alt_gr: self.modifiers & RIGHT_ALT != 0 }
+        Modifiers {
+            shift: self.modifiers & SHIFT != 0,
+            alt_gr: self.modifiers & RIGHT_ALT != 0,
+            ctrl: self.modifiers & CTRL != 0,
+        }
     }
 
     /// Keys held now that weren't in `previous`, the report before: the ones just pressed.
@@ -511,9 +516,28 @@ impl Layout {
         }
     }
 
-    /// The character the key with HID usage `usage` gives with `modifiers` held, if it gives
-    /// one. Accents (Swedish ´ ` ¨ ^ ~) are typed as themselves, not combined with the next
-    /// letter.
+    /// What the key with HID usage `usage` types with `modifiers` held, if anything: a
+    /// character, an accent for the next one, or a Ctrl combination (Ctrl and a letter).
+    pub fn key(self, usage: u8, modifiers: Modifiers) -> Option<Typed> {
+        if modifiers.ctrl {
+            return letter(usage, false).map(Typed::Ctrl);
+        }
+        let c = self.char(usage, modifiers)?;
+        Some(if self.is_dead(usage) { Typed::Dead(c) } else { Typed::Char(c) })
+    }
+
+    /// Whether a key's characters are accents for the next letter rather than characters of
+    /// their own.
+    fn is_dead(self, usage: u8) -> bool {
+        match self {
+            Layout::Us => false,
+            // ´ and `, and ¨, ^ and ~.
+            Layout::Swedish => matches!(usage, 0x2E | 0x30),
+        }
+    }
+
+    /// The character the key with HID usage `usage` gives with `modifiers` held (Ctrl aside),
+    /// if it gives one. An accent's is the accent alone.
     pub fn char(self, usage: u8, modifiers: Modifiers) -> Option<char> {
         // Keys every layout here shares.
         match usage {
@@ -537,6 +561,17 @@ pub struct Modifiers {
     pub shift: bool,
     /// Right Alt, which some layouts use for a third character on a key.
     pub alt_gr: bool,
+    pub ctrl: bool,
+}
+
+/// What pressing a key types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Typed {
+    Char(char),
+    /// An accent to put on the next letter (a dead key), like Swedish ´ before e for é.
+    Dead(char),
+    /// Ctrl and a letter, like `Ctrl('c')`.
+    Ctrl(char),
 }
 
 /// A letter key (usages 0x04 to 0x1D, a to z on both layouts).
@@ -725,9 +760,10 @@ mod tests {
         assert_eq!(KeyboardReport::parse(&[0; 4]), Err(DescriptorError::Truncated));
     }
 
-    const PLAIN: Modifiers = Modifiers { shift: false, alt_gr: false };
-    const SHIFT_HELD: Modifiers = Modifiers { shift: true, alt_gr: false };
-    const ALT_GR: Modifiers = Modifiers { shift: false, alt_gr: true };
+    const PLAIN: Modifiers = Modifiers { shift: false, alt_gr: false, ctrl: false };
+    const SHIFT_HELD: Modifiers = Modifiers { shift: true, ..PLAIN };
+    const ALT_GR: Modifiers = Modifiers { alt_gr: true, ..PLAIN };
+    const CTRL_HELD: Modifiers = Modifiers { ctrl: true, ..PLAIN };
 
     #[test]
     fn keys_map_to_us_layout_characters() {
@@ -771,6 +807,21 @@ mod tests {
     }
 
     #[test]
+    fn keys_say_whether_they_type_accents_or_ctrl_combinations() {
+        assert_eq!(Layout::Swedish.key(0x08, PLAIN), Some(Typed::Char('e')));
+        assert_eq!(Layout::Swedish.key(0x2E, PLAIN), Some(Typed::Dead('´')));
+        assert_eq!(Layout::Swedish.key(0x2E, SHIFT_HELD), Some(Typed::Dead('`')));
+        assert_eq!(Layout::Swedish.key(0x30, SHIFT_HELD), Some(Typed::Dead('^')));
+        assert_eq!(Layout::Swedish.key(0x30, ALT_GR), Some(Typed::Dead('~')));
+        // US has no dead keys: its ` is a character.
+        assert_eq!(Layout::Us.key(0x35, PLAIN), Some(Typed::Char('`')));
+        // Ctrl goes with letters, by position, whatever the layout.
+        assert_eq!(Layout::Swedish.key(0x06, CTRL_HELD), Some(Typed::Ctrl('c')));
+        assert_eq!(Layout::Us.key(0x06, Modifiers { shift: true, ..CTRL_HELD }), Some(Typed::Ctrl('c')));
+        assert_eq!(Layout::Us.key(0x1E, CTRL_HELD), None);
+    }
+
+    #[test]
     fn layouts_are_chosen_by_name() {
         for layout in Layout::ALL {
             assert_eq!(Layout::from_name(layout.name()), Some(layout));
@@ -782,7 +833,9 @@ mod tests {
     #[test]
     fn reports_say_which_modifiers_are_held() {
         let report = KeyboardReport::parse(&[0x20 | 0x40, 0, 0, 0, 0, 0, 0, 0]).unwrap();
-        assert_eq!(report.held(), Modifiers { shift: true, alt_gr: true });
+        assert_eq!(report.held(), Modifiers { shift: true, alt_gr: true, ctrl: false });
+        let right_ctrl = KeyboardReport::parse(&[0x10, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        assert!(right_ctrl.held().ctrl);
         let left_alt = KeyboardReport::parse(&[0x04, 0, 0, 0, 0, 0, 0, 0]).unwrap();
         assert_eq!(left_alt.held(), PLAIN);
     }

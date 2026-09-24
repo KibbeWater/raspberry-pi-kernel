@@ -41,6 +41,18 @@ impl LineEditor {
         }
         None
     }
+
+    /// Throws the line away, taking it back off the screen too.
+    pub fn clear(&mut self, mut echo: impl FnMut(&str)) {
+        while self.line.pop().is_some() {
+            echo("\x08 \x08");
+        }
+    }
+
+    /// The line so far, to show again (after the screen was cleared, say).
+    pub fn line(&self) -> &str {
+        &self.line
+    }
 }
 
 #[cfg(test)]
@@ -75,6 +87,17 @@ mod tests {
         assert_eq!(line, Some("ls".into()));
         // Nothing to take back: nothing happens.
         assert_eq!(type_in(&mut editor, "\x08"), (String::new(), None));
+    }
+
+    #[test]
+    fn clearing_takes_the_whole_line_back() {
+        let mut editor = LineEditor::new(80);
+        type_in(&mut editor, "oops");
+        let mut shown = String::new();
+        editor.clear(|s| shown.push_str(s));
+        assert_eq!(shown, "\x08 \x08".repeat(4));
+        assert_eq!(editor.line(), "");
+        assert_eq!(type_in(&mut editor, "ok\n").1, Some("ok".into()));
     }
 
     #[test]
