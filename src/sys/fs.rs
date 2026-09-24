@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use rustypi_abi::MAX_FILE;
 use rustypi_core::block::{BlockDevice, Lba, WritableBlockDevice, BLOCK_SIZE};
-use rustypi_core::fat::{Fat, FatError, FatType};
+use rustypi_core::fat::{self, Fat, FatError, FatType};
 use rustypi_core::mbr::{self, Volume};
 use crate::drivers::sdcard::{SdCard, SdError};
 use crate::synchronization::{interface::Mutex as _, Mutex};
@@ -136,13 +136,14 @@ fn is_protected(path: &str) -> bool {
             || first.ends_with(".dtb"))
 }
 
-/// Checks a file could be written at `path`: not protected, its directory exists, and it
-/// isn't a directory itself. For finding out early, before collecting what to write.
+/// Checks a file could be written at `path`: not protected, a name FAT can store, its
+/// directory exists, and it isn't a directory itself. For finding out early, before collecting what to write.
 pub fn check_writable(path: &str) -> Result<(), FsError> {
     if is_protected(path) {
         return Err(FsError::Protected);
     }
-    let parent = path.trim_end_matches('/').rsplit_once('/').map_or("", |(parent, _)| parent);
+    let (parent, name) = path.trim_end_matches('/').rsplit_once('/').unwrap_or(("", path));
+    fat::check_name(name)?;
     with_fs(|fs| {
         if !parent.trim_matches('/').is_empty() && fs.fat.metadata(parent)?.kind != EntryKind::Directory {
             return Err(FsError::Fat(FatError::NotADirectory));

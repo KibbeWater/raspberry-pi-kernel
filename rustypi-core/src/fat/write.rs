@@ -78,7 +78,7 @@ impl DirImage {
 }
 
 /// Checks `name` is one FAT can store.
-fn check_name<E>(name: &str) -> Result<(), E> {
+pub fn check_name<E>(name: &str) -> Result<(), E> {
     let bad = name.is_empty()
         || name.encode_utf16().count() > MAX_NAME
         || name == "."

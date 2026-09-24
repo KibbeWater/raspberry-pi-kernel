@@ -11,6 +11,8 @@
 
 mod write;
 
+pub use write::check_name;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
