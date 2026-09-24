@@ -39,7 +39,6 @@ extern "C" {
 
 /// ESR_EL1 exception classes the crashing programs should die of.
 const CLASS_UNKNOWN: u64 = 0x00;
-const CLASS_FP: u64 = 0x07;
 const CLASS_INSTRUCTION_ABORT_EL0: u64 = 0x20;
 const CLASS_DATA_ABORT_EL0: u64 = 0x24;
 
@@ -105,8 +104,8 @@ pub const PROGRAMS: &[Program] = &[
     },
     Program {
         name: "float",
-        description: "use a floating point register",
-        expected: Expected::Crashes(CLASS_FP),
+        description: "keep floating point registers across a sleep",
+        expected: Expected::Exits(0),
         code: user_float,
     },
     Program {

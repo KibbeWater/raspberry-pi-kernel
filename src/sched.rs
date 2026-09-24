@@ -385,6 +385,7 @@ impl Scheduler {
             self.queue.remove(id);
             self.tasks[id.0] = None;
         }
+        arch::fp::allow_for(next);
         let next = self.tasks[next.0].as_ref().expect("scheduled task exists");
         if current_base != Some(next.translation_base) {
             mmu::set_translation_base(next.translation_base);

@@ -2,6 +2,7 @@
 //! AArch64 CPU support: boot, exception levels, exceptions, MMU and IRQ masking.
 
 pub mod exception;
+pub mod fp;
 pub mod mmu;
 
 use core::arch::{asm, global_asm};

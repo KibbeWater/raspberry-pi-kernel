@@ -3,6 +3,9 @@
 // and reach the kernel only through svc. Their stack is 64KB, with unmapped pages around it.
 // Names in braces are system call numbers and error codes from rustypi-abi.
 
+// Programs may use floating point (see arch/fp.rs); the kernel itself is built without it.
+.arch_extension fp
+
 // Makes a system call: arguments in x0 to x5, result in x0.
 .macro USER_SYSCALL number
     mov     x8, #\number
@@ -171,12 +174,33 @@ user_privileged:
     mrs     x0, sctlr_el1
     USER_SYSCALL {EXIT}
 
-// Uses a floating point register, which traps at EL0: killed.
+// Puts its argument's first byte plus a half in d0 and d8, sleeps while the other instance
+// (in `programs test`) does the same with its own, and checks both registers kept their
+// values. Exits 0 if they did.
 .balign 4
 .global user_float
 user_float:
-    .inst   0x1e6e1000              // fmov d0, #1.0, which the softfloat assembler refuses
+    mov     x19, #0
+    cbz     x1, .Lfloat_start
+    ldrb    w19, [x0]
+.Lfloat_start:
+    scvtf   d0, x19
+    fmov    d1, #0.5
+    fadd    d0, d0, d1
+    fmov    d8, d0
+    mov     x0, #50000              // 50ms
+    USER_SYSCALL {SLEEP}
+    scvtf   d2, x19
+    fmov    d1, #0.5
+    fadd    d2, d2, d1
+    fcmp    d0, d2
+    b.ne    .Lfloat_fail
+    fcmp    d8, d2
+    b.ne    .Lfloat_fail
     mov     x0, #0
+    USER_SYSCALL {EXIT}
+.Lfloat_fail:
+    mov     x0, #1
     USER_SYSCALL {EXIT}
 
 // Stores the first byte of its arguments ("1" or "2" in `programs test`, which runs two of

@@ -63,6 +63,8 @@ pub fn far() -> u64 {
 
 /// ESR_EL1 exception class of `svc` from AArch64.
 pub const CLASS_SVC: u64 = 0x15;
+/// ESR_EL1 exception class of an FP/SIMD instruction trapped by CPACR_EL1.
+pub const CLASS_FP: u64 = 0x07;
 
 #[no_mangle]
 extern "C" fn exception_sync(ctx: *mut ExceptionContext, _kind: u64) -> *mut ExceptionContext {
