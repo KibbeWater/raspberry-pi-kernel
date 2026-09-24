@@ -93,6 +93,13 @@ impl BusAddress {
     pub fn to_arm(self) -> usize {
         (self.0 & 0x3FFF_FFFF) as usize
     }
+
+    /// Memory at ARM address `addr` as a DMA engine (like the USB controller's) must be given
+    /// it: through the alias that bypasses the GPU's L2 cache, since the ARM cores don't see
+    /// that cache. The ARM cores' own caches are the caller's business.
+    pub fn from_arm(addr: usize) -> Self {
+        BusAddress((addr & 0x3FFF_FFFF) as u32 | 0xC000_0000)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -398,5 +405,25 @@ mod tests {
     fn bus_addresses_drop_their_cache_alias() {
         assert_eq!(BusAddress(0xC3C0_0000).to_arm(), 0x03C0_0000);
         assert_eq!(BusAddress(0x3C00_0000).to_arm(), 0x3C00_0000);
+    }
+
+    #[test]
+    fn arm_addresses_get_the_uncached_alias_for_dma() {
+        assert_eq!(BusAddress::from_arm(0x0010_0040), BusAddress(0xC010_0040));
+        assert_eq!(BusAddress::from_arm(0x0010_0040).to_arm(), 0x0010_0040);
+    }
+
+    #[test]
+    fn power_states_read_both_ways() {
+        let request = tags::PowerState::on(tags::DeviceId::USB_HCD);
+        assert_eq!((request.device.0, request.state), (3, 0b11));
+        assert!(tags::PowerState { device: tags::DeviceId::USB_HCD, state: 1 }.is_on());
+        assert!(!tags::PowerState { device: tags::DeviceId(99), state: 0b10 }.is_on());
+        assert!(!tags::PowerState { device: tags::DeviceId::USB_HCD, state: 0 }.is_on());
+    }
+
+    #[test]
+    fn mac_addresses_fill_two_words() {
+        assert_eq!(size_of::<tags::MacAddress>(), 8);
     }
 }

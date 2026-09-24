@@ -18,6 +18,24 @@ impl Tag for GetBoardRevision {
     type Response = u32;
 }
 
+/// The board's Ethernet MAC address, as the firmware reports it (the last two bytes pad it to
+/// whole words).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct MacAddress {
+    pub bytes: [u8; 6],
+    _padding: [u8; 2],
+}
+
+unsafe impl Words for MacAddress {}
+
+pub struct GetMacAddress;
+impl Tag for GetMacAddress {
+    const ID: u32 = 0x0001_0003;
+    type Request = ();
+    type Response = MacAddress;
+}
+
 /// A range of memory, in bytes.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -88,6 +106,52 @@ impl Tag for GetClockRate {
     const ID: u32 = 0x0003_0002;
     type Request = ClockId;
     type Response = ClockRate;
+}
+
+/// A block of the SoC the firmware can power on and off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct DeviceId(pub u32);
+
+unsafe impl Words for DeviceId {}
+
+impl DeviceId {
+    /// The USB host controller.
+    pub const USB_HCD: DeviceId = DeviceId(3);
+}
+
+/// A device and its power state. In a request, `state` bit 0 is "on" and bit 1 "wait until
+/// it is stable"; in the response, bit 0 is "on" and bit 1 "no such device".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct PowerState {
+    pub device: DeviceId,
+    pub state: u32,
+}
+
+unsafe impl Words for PowerState {}
+
+impl PowerState {
+    pub const ON: u32 = 1 << 0;
+    pub const WAIT: u32 = 1 << 1;
+    pub const NO_DEVICE: u32 = 1 << 1;
+
+    /// Asks for `device` powered on, answering once it is.
+    pub fn on(device: DeviceId) -> Self {
+        PowerState { device, state: Self::ON | Self::WAIT }
+    }
+
+    /// In a response: whether the device exists and is on.
+    pub fn is_on(self) -> bool {
+        self.state & Self::ON != 0 && self.state & Self::NO_DEVICE == 0
+    }
+}
+
+pub struct SetPowerState;
+impl Tag for SetPowerState {
+    const ID: u32 = 0x0002_8001;
+    type Request = PowerState;
+    type Response = PowerState;
 }
 
 // Framebuffer. The set tags respond with what the firmware actually applied, which can
