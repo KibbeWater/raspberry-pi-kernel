@@ -91,16 +91,20 @@ impl Buffered {
 }
 
 impl Write for Buffered {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let mut bytes = s.as_bytes();
-        while !bytes.is_empty() {
-            if self.len == MAX_WRITE {
-                self.flush()?;
+    /// Cuts only between characters: the kernel checks each write is text on its own.
+    fn write_str(&mut self, mut s: &str) -> fmt::Result {
+        while !s.is_empty() {
+            let mut n = s.len().min(MAX_WRITE - self.len);
+            while !s.is_char_boundary(n) {
+                n -= 1;
             }
-            let n = bytes.len().min(MAX_WRITE - self.len);
-            self.buf[self.len..self.len + n].copy_from_slice(&bytes[..n]);
+            if n == 0 {
+                self.flush()?;
+                continue;
+            }
+            self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
             self.len += n;
-            bytes = &bytes[n..];
+            s = &s[n..];
         }
         Ok(())
     }
