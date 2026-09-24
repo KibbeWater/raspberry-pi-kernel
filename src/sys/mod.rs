@@ -9,6 +9,7 @@ pub mod fs;
 pub mod memory;
 pub mod print;
 pub mod random;
+pub mod usb;
 mod heap;
 mod panic;
 

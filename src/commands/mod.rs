@@ -17,6 +17,7 @@ mod screen;
 mod storage;
 mod system;
 mod tasks;
+mod usb;
 
 use alloc::format;
 use alloc::string::String;
@@ -72,6 +73,7 @@ const GROUPS: &[&[Command]] = &[
     storage::COMMANDS,
     tasks::COMMANDS,
     programs::COMMANDS,
+    usb::COMMANDS,
 ];
 
 fn commands() -> impl Iterator<Item = &'static Command> {

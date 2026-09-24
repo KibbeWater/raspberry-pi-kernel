@@ -9,3 +9,4 @@ pub mod rng;
 pub mod sdcard;
 pub mod timer;
 pub mod uart;
+pub mod usb;
