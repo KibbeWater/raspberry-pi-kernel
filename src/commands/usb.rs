@@ -67,7 +67,7 @@ fn list(device: &Device<UsbError>, at: &str, reply: &mut Reply) {
     for (i, port) in hub.ports.iter().enumerate() {
         let port_at = alloc::format!("{}port {}: ", child_at, i + 1);
         match port {
-            Port::Empty => {}
+            Port::Empty => reply.line(LineKind::Rsp, format_args!("{port_at}empty")),
             Port::Device(child) => list(child, &port_at, reply),
             Port::NeedsSplit(speed) => reply.line(LineKind::Rsp, format_args!(
                 "{}{} speed device, needs split transactions (not yet)",

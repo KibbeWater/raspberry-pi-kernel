@@ -38,6 +38,10 @@ const MAX_ADDRESS: u8 = 127;
 /// USB 2.0 timings: after SET_ADDRESS, and after a port reset completes.
 const SET_ADDRESS_RECOVERY_MS: u32 = 2;
 const RESET_RECOVERY_MS: u32 = 10;
+/// At least this long between powering a hub's ports and looking for devices on them: the
+/// hub's own power-good time is too short for some devices to attach, like the Pi 3 B+'s
+/// LAN7800 (Circle waits the same, for the same reason).
+const MIN_POWER_UP_MS: u32 = 510;
 /// How long a hub gets to finish resetting a port, checked every `RESET_POLL_MS`.
 const RESET_TIMEOUT_MS: u32 = 500;
 const RESET_POLL_MS: u32 = 10;
@@ -185,7 +189,7 @@ impl<B: Bus> Enumerator<'_, B> {
         for port in 1..=descriptor.ports {
             self.control(hub, SetupPacket::set_port_feature(port, PortFeature::POWER), &mut [])?;
         }
-        self.bus.delay_ms(descriptor.power_on_to_good_ms);
+        self.bus.delay_ms(descriptor.power_on_to_good_ms.max(MIN_POWER_UP_MS));
         let ports = (1..=descriptor.ports).map(|port| self.port(hub, port, depth)).collect();
         Ok(Hub { descriptor, ports })
     }
@@ -472,7 +476,7 @@ mod tests {
     fn hubs_wait_for_their_ports_to_power_up() {
         let mut bus = FakeBus::pi_3b_plus();
         enumerate(&mut bus, Speed::High).unwrap();
-        // Two hubs' 100ms power-up at least, plus reset polling and recovery.
-        assert!(bus.slept_ms >= 200, "slept {} ms", bus.slept_ms);
+        // Two hubs' power-up, at least `MIN_POWER_UP_MS` each, plus reset polling and recovery.
+        assert!(bus.slept_ms >= 2 * MIN_POWER_UP_MS, "slept {} ms", bus.slept_ms);
     }
 }
