@@ -40,13 +40,15 @@ impl Console {
         self.cells[row * self.cols + col]
     }
 
-    /// Writes `s`, drawing every cell that changes. Handles `\n`, `\r` and `\t`; other
-    /// control characters are ignored.
+    /// Writes `s`, drawing every cell that changes. Handles `\n`, `\r`, `\t` and backspace
+    /// (`\x08`, which moves back a cell without erasing it, like a terminal); other control
+    /// characters are ignored.
     pub fn write_str(&mut self, s: &str, surface: &mut impl Surface) {
         for c in s.chars() {
             match c {
                 '\n' => self.newline(surface),
                 '\r' => self.col = 0,
+                '\x08' => self.col = self.col.saturating_sub(1),
                 // Like a terminal, a tab moves the cursor without erasing what it passes.
                 '\t' => self.col = ((self.col / TAB_WIDTH + 1) * TAB_WIDTH).min(self.cols),
                 c if c.is_control() => {}
@@ -165,6 +167,17 @@ mod tests {
         let mut screen = Screen::new(&console);
         console.write_str("abc\rX\x07\ta", &mut screen);
         assert_eq!(screen.row(0), "Xbc     a   ");
+    }
+
+    #[test]
+    fn backspace_moves_back_so_a_space_erases() {
+        let mut console = Console::new(5, 2);
+        let mut screen = Screen::new(&console);
+        console.write_str("abc\x08 \x08d", &mut screen);
+        assert_eq!(screen.row(0), "abd  ");
+        // Not past the start of the line.
+        console.write_str("\r\x08\x08X", &mut screen);
+        assert_eq!(screen.row(0), "Xbd  ");
     }
 
     #[test]

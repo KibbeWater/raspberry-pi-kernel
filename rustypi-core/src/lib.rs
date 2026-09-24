@@ -14,6 +14,7 @@ pub mod font;
 pub mod frames;
 pub mod graphics;
 pub mod heap;
+pub mod line;
 pub mod link;
 pub mod lock;
 pub mod mailbox;

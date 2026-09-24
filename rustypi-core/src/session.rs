@@ -42,9 +42,22 @@ pub struct Reply {
     lines: Vec<(LineKind, String)>,
 }
 
+impl Default for Reply {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Reply {
-    const fn new() -> Self {
+    /// An empty reply. `Session` makes its own for requests from the link; this is for
+    /// commands from anywhere else, like a local keyboard.
+    pub const fn new() -> Self {
         Reply { lines: Vec::new() }
+    }
+
+    /// The reply's lines so far, oldest first.
+    pub fn lines(&self) -> impl Iterator<Item = &str> {
+        self.lines.iter().map(|(_, line)| line.as_str())
     }
 
     /// Adds a formatted line.
