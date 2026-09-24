@@ -1,9 +1,11 @@
 // interrupt.rs
-//! BCM2835 interrupt controller. GPU interrupts reach core 0 as IRQs by default.
+//! Interrupts: each core's generic timer through the local interrupt controller, and the
+//! BCM2835 controller's GPU interrupts, which reach core 0 only.
 
 use core::ptr::{read_volatile, write_volatile};
 use crate::board::PERIPHERAL_BASE;
-use crate::drivers::timer;
+use crate::arch;
+use crate::drivers::local;
 use crate::drivers::uart::Uart;
 
 const IRQ_BASE: usize = PERIPHERAL_BASE + 0xB200;
@@ -15,8 +17,6 @@ const IRQ_ENABLE_2: usize = IRQ_BASE + 0x14;
 /// GPU interrupt numbers (0-63) this kernel uses.
 #[derive(Clone, Copy)]
 pub enum Irq {
-    /// System timer compare 1. Compares 0 and 2 belong to the GPU.
-    SystemTimer1 = 1,
     Uart0 = 57,
 }
 
@@ -44,11 +44,12 @@ pub struct Serviced {
     pub uart: bool,
 }
 
-/// Runs the handler of every pending interrupt. Called from the IRQ vector.
+/// Runs the handler of every interrupt pending on this core. Called from the IRQ vector.
 pub fn handle() -> Serviced {
-    let serviced = Serviced { timer: is_pending(Irq::SystemTimer1), uart: is_pending(Irq::Uart0) };
+    let sources = local::pending(arch::core_id());
+    let serviced = Serviced { timer: sources.timer, uart: sources.gpu && is_pending(Irq::Uart0) };
     if serviced.timer {
-        timer::handle_interrupt();
+        arch::timer::rearm();
     }
     if serviced.uart {
         Uart::handle_interrupt();

@@ -15,7 +15,7 @@ use core::time::Duration;
 use crate::arch;
 use crate::drivers::interrupt::{self, Irq};
 use crate::drivers::mailbox::{self, tags, Batch, Mailbox};
-use crate::drivers::{power, timer};
+use crate::drivers::{local, power, timer};
 use crate::drivers::uart::Uart;
 
 /// Git commit the kernel was built from, with `-dirty` for uncommitted changes.
@@ -44,13 +44,19 @@ pub fn heap_stats() -> HeapStats {
     heap::stats()
 }
 
-/// Starts interrupt-driven UART receive and the timer tick, then unmasks IRQs.
+/// Starts interrupt-driven UART receive and core 0's timer tick, then unmasks IRQs.
 /// Call once the UART is initialized.
 pub fn enable_interrupts() {
     Uart::enable_rx_interrupt();
     interrupt::enable(Irq::Uart0);
-    timer::start_tick(TICK.as_micros() as u32);
-    interrupt::enable(Irq::SystemTimer1);
+    arch::timer::set_tick(TICK);
+    start_tick();
+}
+
+/// Starts this core's timer tick and unmasks its IRQs.
+fn start_tick() {
+    local::route_timer(arch::core_id());
+    arch::timer::start();
     arch::irq_enable();
 }
 

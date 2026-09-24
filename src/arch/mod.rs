@@ -4,6 +4,7 @@
 pub mod exception;
 pub mod fp;
 pub mod mmu;
+pub mod timer;
 
 use core::arch::{asm, global_asm};
 
