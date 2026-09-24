@@ -119,7 +119,32 @@ pub struct DirEntry {
     pub kind: EntryKind,
     /// Bytes; always 0 for directories.
     pub size: u32,
+    /// When it was last changed.
+    pub modified: Stamp,
     first_cluster: Cluster,
+}
+
+/// A date and time as a FAT entry keeps it: to two seconds, from 1980. Whatever wrote the
+/// entry decided the time zone; RustyPI writes UTC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stamp {
+    pub date: u16,
+    pub time: u16,
+}
+
+impl core::fmt::Display for Stamp {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        let (date, time) = (self.date, self.time);
+        write!(
+            f,
+            "{}-{:02}-{:02} {:02}:{:02}",
+            1980 + (date >> 9),
+            date >> 5 & 0xF,
+            date & 0x1F,
+            time >> 11,
+            time >> 5 & 0x3F,
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -567,6 +592,7 @@ fn parse_located(bytes: &[u8], fat_type: FatType) -> Vec<Located> {
                     name,
                     kind: if directory { EntryKind::Directory } else { EntryKind::File },
                     size: if directory { 0 } else { u32_at(entry, 28) },
+                    modified: Stamp { date: u16_at(entry, 24), time: u16_at(entry, 22) },
                     first_cluster: Cluster(high << 16 | u16_at(entry, 26) as u32),
                 };
                 entries.push(Located { entry, slots });

@@ -191,8 +191,8 @@ fn ls<'a>(shell: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     }
     for entry in entries.iter().take(MAX_LISTING_LINES) {
         match entry.kind {
-            EntryKind::Directory => reply.line(LineKind::Rsp, format_args!("{:>9}  {}/", "", entry.name)),
-            EntryKind::File => reply.line(LineKind::Rsp, format_args!("{:>9}  {}", entry.size, entry.name)),
+            EntryKind::Directory => reply.line(LineKind::Rsp, format_args!("{:>9}  {}  {}/", "", entry.modified, entry.name)),
+            EntryKind::File => reply.line(LineKind::Rsp, format_args!("{:>9}  {}  {}", entry.size, entry.modified, entry.name)),
         }
     }
     if entries.len() > MAX_LISTING_LINES {

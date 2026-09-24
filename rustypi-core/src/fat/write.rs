@@ -616,6 +616,9 @@ mod tests {
             assert_eq!(stamps(&mut fat, "/", "stamped"), (DEFAULT_STAMP.0, date, time));
             fat.create_dir("/newdir").unwrap();
             assert_eq!(stamps(&mut fat, "/", "newdir"), (date, date, time));
+            // And what listings show.
+            let entry = fat.metadata("/stamped").unwrap();
+            assert_eq!(format!("{}", entry.modified), "2026-09-21 14:13");
         }
     }
 
