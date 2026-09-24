@@ -37,6 +37,8 @@ const POWER: usize = USB_BASE + 0xE00;
 
 // Host registers.
 const HOST_CFG: usize = USB_BASE + 0x400;
+/// The (micro)frame number: at high speed, the low 3 bits are the microframe.
+const HOST_FRAME_NUMBER: usize = USB_BASE + 0x408;
 const HOST_PORT: usize = USB_BASE + 0x440;
 
 /// Host channel `n`'s registers, 0x20 apart.
@@ -91,8 +93,8 @@ const CHAN_SPLIT_ALL: u32 = 3;
 
 const CHAR_EP_IN: u32 = 1 << 15;
 const CHAR_LOW_SPEED: u32 = 1 << 17;
-const CHAR_EP_CONTROL: u32 = 0 << 18;
 const CHAR_MULTI_COUNT_1: u32 = 1 << 20;
+const CHAR_ODD_FRAME: u32 = 1 << 29;
 const CHAR_DISABLE: u32 = 1 << 30;
 const CHAR_ENABLE: u32 = 1 << 31;
 
@@ -121,6 +123,31 @@ impl Pid {
     }
 }
 
+/// An endpoint's data toggle: which of DATA0 and DATA1 its next packet carries. Each
+/// interrupt or bulk endpoint keeps its own, starting at DATA0 once the device is configured.
+#[derive(Clone, Copy)]
+pub struct Toggle(Pid);
+
+impl Toggle {
+    pub const fn new() -> Self {
+        Toggle(Pid::Data0)
+    }
+}
+
+impl Default for Toggle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// An interrupt IN endpoint, as `Host::interrupt_in` polls it.
+#[derive(Clone, Copy)]
+pub struct InterruptIn {
+    pub target: Target,
+    pub endpoint: u8,
+    pub max_packet: u16,
+}
+
 /// FIFO sizes, in 32-bit words. The controller has 4080 in all.
 const RX_FIFO_WORDS: u32 = 1024;
 const NP_TX_FIFO_WORDS: u32 = 1024;
@@ -144,6 +171,8 @@ const MAX_SPLIT_ERRORS: u32 = 3;
 const MAX_NYETS: u32 = 3;
 /// A high speed microframe.
 const MICROFRAME_US: u64 = 125;
+/// Longer than any wait for a particular (micro)frame should take: a frame and a bit.
+const FRAME_WAIT_US: u64 = 2_000;
 const REGISTER_TIMEOUT_US: u64 = 100_000;
 
 const CACHE_LINE: usize = 64;
@@ -325,7 +354,7 @@ impl Host {
     fn direct_transfer(&mut self, target: Target, direction: Direction, pid: Pid, length: usize, stage: &'static str) -> Result<usize, UsbError> {
         let packets = length.div_ceil(target.max_packet as usize).max(1) as u32;
         loop {
-            let (interrupts, remaining) = self.run_channel(target, direction, pid, 0, length, packets, 0)?;
+            let (interrupts, remaining) = self.run_channel(Transaction::control(target, direction, pid, 0, length, packets))?;
             if interrupts & INT_STALL != 0 {
                 return Err(UsbError::Stalled(stage));
             }
@@ -337,7 +366,7 @@ impl Host {
             if interrupts & INT_ERRORS != 0 || interrupts & INT_XFER_COMPLETE == 0 {
                 return Err(UsbError::Transfer { stage, interrupts });
             }
-            return Ok(length - remaining.min(length));
+            return Ok(length - remaining);
         }
     }
 
@@ -392,7 +421,7 @@ impl Host {
             if timer::now_us() - started > SPLIT_TIMEOUT_US {
                 return Err(UsbError::Timeout("a split transaction"));
             }
-            let (interrupts, _) = self.run_channel(target, direction, pid, offset, size, 1, split)?;
+            let (interrupts, _) = self.run_channel(Transaction { split, ..Transaction::control(target, direction, pid, offset, size, 1) })?;
             if interrupts & INT_STALL != 0 {
                 return Err(UsbError::Stalled(stage));
             }
@@ -410,12 +439,13 @@ impl Host {
 
             let mut nyets = 0;
             loop {
-                let (interrupts, remaining) = self.run_channel(target, direction, pid, offset, size, 1, split | CHAN_SPLIT_COMPLETE)?;
+                let complete = Transaction { split: split | CHAN_SPLIT_COMPLETE, ..Transaction::control(target, direction, pid, offset, size, 1) };
+                let (interrupts, remaining) = self.run_channel(complete)?;
                 if interrupts & INT_STALL != 0 {
                     return Err(UsbError::Stalled(stage));
                 }
                 if interrupts & INT_XFER_COMPLETE != 0 {
-                    return Ok(size - remaining.min(size));
+                    return Ok(size - remaining);
                 }
                 if interrupts & INT_NAK != 0 {
                     // The device wasn't ready: start the packet over, a little later.
@@ -439,36 +469,113 @@ impl Host {
         }
     }
 
-    /// Runs one transaction (or, direct, a whole stage) on the control channel and waits for
-    /// it to halt. `split` goes into the split register. Returns the channel's interrupt bits
-    /// and how many of `length` bytes weren't moved.
-    #[allow(clippy::too_many_arguments)]
-    fn run_channel(
-        &mut self,
-        target: Target,
-        direction: Direction,
-        pid: Pid,
-        offset: usize,
-        length: usize,
-        packets: u32,
-        split: u32,
-    ) -> Result<(u32, usize), UsbError> {
+    /// Polls an interrupt IN endpoint once: `Some` of the bytes it sent into `data`, or `None`
+    /// if it had nothing new (it NAKed, as a keyboard does between key changes). `toggle` is
+    /// the endpoint's, and moves on when data arrives.
+    pub fn interrupt_in(&mut self, endpoint: InterruptIn, toggle: &mut Toggle, data: &mut [u8]) -> Result<Option<usize>, UsbError> {
+        let length = (endpoint.max_packet as usize).min(data.len()).min(self.buffer.0.len());
+        let base = Transaction {
+            target: endpoint.target,
+            endpoint: endpoint.endpoint,
+            kind: Kind::Interrupt,
+            direction: Direction::In,
+            pid: toggle.0,
+            offset: 0,
+            length,
+            packets: 1,
+            split: 0,
+            odd_frame: false,
+        };
+        let received = match endpoint.target.translator {
+            None => self.direct_interrupt(base)?,
+            Some(translator) => self.split_interrupt(base, translator)?,
+        };
+        if let Some(count) = received {
+            data[..count].copy_from_slice(&self.buffer.0[..count]);
+            toggle.0 = toggle.0.toggled();
+        }
+        Ok(received)
+    }
+
+    /// An interrupt transaction straight to the device, in the next frame.
+    fn direct_interrupt(&mut self, t: Transaction) -> Result<Option<usize>, UsbError> {
+        let now = frame_number();
+        wait_for("the next frame", FRAME_WAIT_US, || frame_number() != now)?;
+        let (interrupts, remaining) = self.run_channel(Transaction { odd_frame: frame_number() & 1 != 0, ..t })?;
+        if interrupts & INT_XFER_COMPLETE != 0 {
+            return Ok(Some(t.length - remaining));
+        }
+        interrupt_outcome(interrupts)
+    }
+
+    /// An interrupt transaction through a transaction translator, on the microframe schedule
+    /// periodic splits need, like Circle's periodic scheduler: the start split in the next
+    /// microframe (never the 6th of a frame), complete splits from two microframes later.
+    fn split_interrupt(&mut self, t: Transaction, translator: Translator) -> Result<Option<usize>, UsbError> {
+        let split = CHAN_SPLIT_ENABLE
+            | CHAN_SPLIT_ALL << 14
+            | (translator.hub as u32 & 0x7F) << 7
+            | translator.port as u32 & 0x7F;
+        for _ in 0..MAX_SPLIT_ERRORS {
+            let mut next = (frame_number() + 1) & 7;
+            if next == 6 {
+                next = 7;
+            }
+            wait_for_microframe(next)?;
+            let (interrupts, _) = self.run_channel(Transaction { split, odd_frame: frame_number() & 1 != 0, ..t })?;
+            if interrupts & INT_ACK == 0 {
+                // The translator had no room for it: nothing this time.
+                return interrupt_outcome(interrupts);
+            }
+
+            let mut tries = if next == 5 { 2 } else { 3 };
+            next = (next + 2) & 7;
+            loop {
+                wait_for_microframe(next)?;
+                let complete = Transaction { split: split | CHAN_SPLIT_COMPLETE, odd_frame: frame_number() & 1 != 0, ..t };
+                let (interrupts, remaining) = self.run_channel(complete)?;
+                if interrupts & INT_XFER_COMPLETE != 0 {
+                    return Ok(Some(t.length - remaining));
+                }
+                if interrupts & (INT_NAK | INT_STALL | INT_ERRORS) != 0 {
+                    return interrupt_outcome(interrupts);
+                }
+                // NYET: the answer isn't through the translator yet.
+                if tries == 0 {
+                    break;
+                }
+                tries -= 1;
+                next = (next + 1) & 7;
+            }
+            // Out of complete splits: start the transaction over, after a frame.
+            timer::delay_us(8 * MICROFRAME_US);
+        }
+        Err(UsbError::Timeout("a periodic split transaction"))
+    }
+
+    /// Runs one transaction (or, direct, a whole control stage) on the channel and waits for
+    /// it to halt. Returns the channel's interrupt bits and how many of its bytes weren't moved.
+    fn run_channel(&mut self, t: Transaction) -> Result<(u32, usize), UsbError> {
         let n = CONTROL_CHANNEL;
         self.buffer.clean_and_invalidate();
         write(channel(n, CHAN_INT), u32::MAX);
         write(channel(n, CHAN_INT_MASK), 0);
-        write(channel(n, CHAN_SPLIT), split);
-        write(channel(n, CHAN_XFER_SIZE), length as u32 | packets << 19 | (pid as u32) << 29);
-        write(channel(n, CHAN_DMA), self.buffer.bus_address() + offset as u32);
-        let mut character = target.max_packet as u32 & 0x7FF
-            | CHAR_EP_CONTROL
+        write(channel(n, CHAN_SPLIT), t.split);
+        write(channel(n, CHAN_XFER_SIZE), t.length as u32 | t.packets << 19 | (t.pid as u32) << 29);
+        write(channel(n, CHAN_DMA), self.buffer.bus_address() + t.offset as u32);
+        let mut character = t.target.max_packet as u32 & 0x7FF
+            | (t.endpoint as u32 & 0xF) << 11
+            | (t.kind as u32) << 18
             | CHAR_MULTI_COUNT_1
-            | (target.address as u32 & 0x7F) << 22;
-        if direction == Direction::In {
+            | (t.target.address as u32 & 0x7F) << 22;
+        if t.direction == Direction::In {
             character |= CHAR_EP_IN;
         }
-        if target.speed == Speed::Low {
+        if t.target.speed == Speed::Low {
             character |= CHAR_LOW_SPEED;
+        }
+        if t.odd_frame {
+            character |= CHAR_ODD_FRAME;
         }
         write(channel(n, CHAN_CHARACTER), character | CHAR_ENABLE);
 
@@ -477,8 +584,72 @@ impl Host {
         // DMA may have written the buffer: drop anything the CPU cached of it meanwhile.
         self.buffer.clean_and_invalidate();
         let remaining = (read(channel(n, CHAN_XFER_SIZE)) & 0x7FFFF) as usize;
-        Ok((interrupts, remaining))
+        Ok((interrupts, remaining.min(t.length)))
     }
+}
+
+/// Endpoint types, as the channel characteristics register has them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Control = 0,
+    Interrupt = 3,
+}
+
+/// One transaction for the channel to run.
+#[derive(Clone, Copy)]
+struct Transaction {
+    target: Target,
+    endpoint: u8,
+    kind: Kind,
+    direction: Direction,
+    pid: Pid,
+    /// Where in the DMA buffer its data is, and how much.
+    offset: usize,
+    length: usize,
+    packets: u32,
+    /// The split register: 0 for none.
+    split: u32,
+    /// For periodic transactions: run in an odd (micro)frame, rather than an even one.
+    odd_frame: bool,
+}
+
+impl Transaction {
+    /// A control stage's packets on endpoint 0.
+    fn control(target: Target, direction: Direction, pid: Pid, offset: usize, length: usize, packets: u32) -> Self {
+        Transaction {
+            target,
+            endpoint: 0,
+            kind: Kind::Control,
+            direction,
+            pid,
+            offset,
+            length,
+            packets,
+            split: 0,
+            odd_frame: false,
+        }
+    }
+}
+
+/// What an interrupt transaction that didn't bring data means: nothing new (NAK), or an error.
+fn interrupt_outcome(interrupts: u32) -> Result<Option<usize>, UsbError> {
+    if interrupts & INT_STALL != 0 {
+        Err(UsbError::Stalled("interrupt"))
+    } else if interrupts & INT_NAK != 0 {
+        Ok(None)
+    } else {
+        Err(UsbError::Transfer { stage: "interrupt", interrupts })
+    }
+}
+
+/// The current (micro)frame number.
+fn frame_number() -> u32 {
+    read(HOST_FRAME_NUMBER) & 0xFFFF
+}
+
+/// Waits until the bus is in microframe `microframe` (0 to 7) of a frame.
+fn wait_for_microframe(microframe: u32) -> Result<(), UsbError> {
+    wait_for("a microframe", FRAME_WAIT_US, || frame_number() & 7 == microframe)
 }
 
 /// Resets the core and sets up its PHY and DMA, like Circle's `InitCore`.
