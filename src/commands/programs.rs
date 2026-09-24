@@ -3,6 +3,7 @@
 
 use alloc::vec::Vec;
 use rustypi_core::elf;
+use rustypi_core::sched::TaskId;
 use rustypi_core::session::{LineKind, Reply};
 use super::{Command, Outcome, Shell};
 use crate::process::{self, Code, PROGRAMS};
@@ -10,7 +11,8 @@ use crate::sys;
 
 pub const COMMANDS: &[Command] = &[
     Command { name: "programs", args: "[test]", description: "list built-in programs, or test them all", run: programs },
-    Command { name: "run", args: "<path|builtin> [args]", description: "start a program at EL0", run: run_program },
+    Command { name: "run", args: "<program> [args]", description: "start a program: a path, or built-in", run: run_program },
+    Command { name: "kill", args: "<task>", description: "stop a running program", run: kill },
 ];
 
 fn programs<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
@@ -65,6 +67,18 @@ fn run_program<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'
     match started {
         Ok(process) => reply.line(LineKind::Rsp, format_args!("started {} as task {}", program, process.id().0)),
         Err(error) => reply.line(LineKind::Rsp, format_args!("run: {}", error)),
+    }
+    Outcome::Done
+}
+
+fn kill<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+    let Ok(id) = args.parse() else {
+        return Outcome::Usage;
+    };
+    match process::kill(TaskId(id)) {
+        // The exit line follows once it has stopped.
+        Ok(()) => reply.line(LineKind::Rsp, format_args!("killing task {}", id)),
+        Err(error) => reply.line(LineKind::Rsp, format_args!("kill: task {}: {}", id, error)),
     }
     Outcome::Done
 }

@@ -1,8 +1,10 @@
 // tasks.rs
-//! Kernel tasks and the scheduler.
+//! Tasks and the scheduler.
 
+use alloc::format;
 use alloc::vec::Vec;
 use core::time::Duration;
+use rustypi_core::sched::CPU_WINDOW;
 use rustypi_core::session::{LineKind, Reply};
 use super::{Command, Outcome, Shell};
 use crate::sched;
@@ -25,31 +27,28 @@ fn tasks<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     Outcome::Done
 }
 
+/// Every task, with its CPU use over the last second and in total.
 fn list(reply: &mut Reply) {
-    let tasks = sched::tasks();
-    let total: u64 = tasks.iter().map(|(info, _)| info.ticks).sum::<u64>().max(1);
-    reply.line(LineKind::Rsp, format_args!("{:>3}  {:<8} {:<9} {:>5}  {}", "id", "name", "state", "cpu", "stack"));
-    for (info, stack) in tasks {
-        let percent = info.ticks * 100 / total;
-        match stack {
-            Some((used, size)) => reply.line(LineKind::Rsp, format_args!(
-                "{:>3}  {:<8} {:<9} {:>4}%  {}.{}/{} KB",
-                info.id.0,
-                info.name,
-                info.state.name(),
-                percent,
-                used / 1024,
-                used % 1024 * 10 / 1024,
-                size / 1024,
-            )),
-            None => reply.line(LineKind::Rsp, format_args!(
-                "{:>3}  {:<8} {:<9} {:>4}%  boot stack",
-                info.id.0,
-                info.name,
-                info.state.name(),
-                percent,
-            )),
-        }
+    reply.line(LineKind::Rsp, format_args!(
+        "{:>3}  {:<10} {:<9} {:>4} {:>9}  {}",
+        "id", "name", "state", "cpu", "time", "stack",
+    ));
+    for (info, stack) in sched::tasks() {
+        let cpu_ms = info.ticks * sys::TICK.as_millis() as u64;
+        let stack = match stack {
+            Some((used, size)) => format!("{}.{}/{} KB", used / 1024, used % 1024 * 10 / 1024, size / 1024),
+            None => "boot stack".into(),
+        };
+        reply.line(LineKind::Rsp, format_args!(
+            "{:>3}  {:<10} {:<9} {:>3}% {:>6}.{}s  {}",
+            info.id.0,
+            info.name,
+            info.state.name(),
+            info.recent_ticks * 100 / CPU_WINDOW,
+            cpu_ms / 1000,
+            cpu_ms % 1000 / 100,
+            stack,
+        ));
     }
 }
 

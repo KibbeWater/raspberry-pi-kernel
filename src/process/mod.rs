@@ -43,6 +43,8 @@ pub enum Exit {
     Code(i32),
     /// It faulted and was killed.
     Crashed(Fault),
+    /// `kill` stopped it.
+    Killed,
 }
 
 /// A synchronous exception a program caused.
@@ -66,6 +68,7 @@ impl fmt::Display for Exit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Exit::Code(code) => write!(f, "exited {}", code),
+            Exit::Killed => write!(f, "killed"),
             Exit::Crashed(fault) => write!(
                 f,
                 "crashed: {} at {:#x} (far {:#x})",
@@ -137,6 +140,8 @@ struct Running {
     _asid: Asid,
     /// Where its exit goes, for whoever waits on it.
     exit: Arc<IrqLock<Option<Exit>>>,
+    /// Set by `kill`: it exits instead of returning from its current system call.
+    killed: bool,
 }
 
 /// Running programs, by task.
@@ -202,7 +207,7 @@ pub fn spawn(name: &str, code: Code, args: &str) -> Result<Process, SpawnError> 
         args: [args_at, args.len() as u64],
     };
     let exit = Arc::new(IrqLock::new(None));
-    let running = Running { name: name.into(), memory, _asid: asid, exit: exit.clone() };
+    let running = Running { name: name.into(), memory, _asid: asid, exit: exit.clone(), killed: false };
     // Registered under the lock, so the program can't make a system call before it is known.
     let id = PROCESSES.lock(|processes| {
         let id = sched::spawn_user(name, start);
@@ -210,6 +215,44 @@ pub fn spawn(name: &str, code: Code, args: &str) -> Result<Process, SpawnError> 
         id
     });
     Ok(Process { id, exit })
+}
+
+#[derive(Debug)]
+pub enum KillError {
+    /// No program runs as that task: it is a kernel task, or gone.
+    NotAProgram,
+}
+
+impl fmt::Display for KillError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            KillError::NotAProgram => write!(f, "not a running program"),
+        }
+    }
+}
+
+/// Stops the program running as task `id`. It may be running user code, or in a system call
+/// with the kernel partway through something on its behalf, so it isn't torn down from here:
+/// user code is sent straight to `exit`, and a system call exits instead of returning (right
+/// away, if it was asleep).
+pub fn kill(id: TaskId) -> Result<(), KillError> {
+    PROCESSES.lock(|processes| {
+        let running = processes.get_mut(&id).ok_or(KillError::NotAProgram)?;
+        running.killed = true;
+        if !sched::redirect_to_kernel(id, exit_killed) {
+            sched::interrupt(id);
+        }
+        Ok(())
+    })
+}
+
+/// Where a program killed while at EL0 resumes, on its kernel stack.
+extern "C" fn exit_killed() -> ! {
+    exit(Exit::Killed)
+}
+
+fn was_killed(id: TaskId) -> bool {
+    PROCESSES.lock(|processes| processes.get(&id).is_some_and(|running| running.killed))
 }
 
 /// Handles a synchronous exception from EL0: a system call, or a fault that kills the program.
@@ -225,6 +268,9 @@ pub fn on_user_sync(ctx: *mut ExceptionContext) -> *mut ExceptionContext {
     let registers = Registers { number: context.gpr[8], args: [x0, x1, x2, x3, x4, x5] };
     arch::irq_enable();
     let result = Syscall::decode(registers).and_then(syscall);
+    if was_killed(sched::current()) {
+        exit(Exit::Killed);
+    }
     // exception_restore loads ELR and SPSR from the context before the eret; an interrupt in
     // between would overwrite them.
     arch::irq_disable();

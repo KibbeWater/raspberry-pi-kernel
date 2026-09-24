@@ -47,12 +47,26 @@ pub struct TaskInfo {
     pub state: State,
     /// Timer ticks during which this task was running.
     pub ticks: u64,
+    /// How many of the last `CPU_WINDOW` ticks it was running for.
+    pub recent_ticks: u64,
 }
+
+/// Recent CPU use is measured over this many ticks: a second at the kernel's 10ms tick.
+pub const CPU_WINDOW: u64 = 100;
 
 struct Entry {
     name: Arc<str>,
     state: State,
     ticks: u64,
+    /// Ticks in the current window, and in the last complete one.
+    window_ticks: u64,
+    recent_ticks: u64,
+}
+
+impl Entry {
+    fn new(name: Arc<str>, state: State) -> Self {
+        Entry { name, state, ticks: 0, window_ticks: 0, recent_ticks: 0 }
+    }
 }
 
 pub struct RunQueue {
@@ -60,15 +74,18 @@ pub struct RunQueue {
     tasks: Vec<Option<Entry>>,
     current: TaskId,
     idle: Option<TaskId>,
+    /// Ticks into the current CPU window.
+    window_elapsed: u64,
 }
 
 impl RunQueue {
     /// A queue whose only task is the one already running, which becomes task 0.
     pub fn new(name: impl Into<Arc<str>>) -> Self {
         RunQueue {
-            tasks: alloc::vec![Some(Entry { name: name.into(), state: State::Running, ticks: 0 })],
+            tasks: alloc::vec![Some(Entry::new(name.into(), State::Running))],
             current: TaskId(0),
             idle: None,
+            window_elapsed: 0,
         }
     }
 
@@ -78,7 +95,7 @@ impl RunQueue {
 
     /// Adds a ready task.
     pub fn add(&mut self, name: impl Into<Arc<str>>) -> TaskId {
-        self.tasks.push(Some(Entry { name: name.into(), state: State::Ready, ticks: 0 }));
+        self.tasks.push(Some(Entry::new(name.into(), State::Ready)));
         TaskId(self.tasks.len() - 1)
     }
 
@@ -135,6 +152,18 @@ impl RunQueue {
         }
     }
 
+    /// Makes a sleeping or waiting task ready early, so it notices something has changed
+    /// (like being killed). Returns whether it was sleeping or waiting.
+    pub fn interrupt(&mut self, id: TaskId) -> bool {
+        match self.entry_mut(id) {
+            Some(entry) if matches!(entry.state, State::Sleeping { .. } | State::Waiting(_)) => {
+                entry.state = State::Ready;
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn finish_current(&mut self) {
         self.set_current(State::Finished);
     }
@@ -156,6 +185,14 @@ impl RunQueue {
         let current = self.current;
         if let Some(entry) = self.entry_mut(current) {
             entry.ticks += 1;
+            entry.window_ticks += 1;
+        }
+        self.window_elapsed += 1;
+        if self.window_elapsed == CPU_WINDOW {
+            self.window_elapsed = 0;
+            for entry in self.tasks.iter_mut().flatten() {
+                entry.recent_ticks = core::mem::take(&mut entry.window_ticks);
+            }
         }
         for entry in self.tasks.iter_mut().flatten() {
             if let State::Sleeping { until_us } = entry.state {
@@ -219,7 +256,13 @@ impl RunQueue {
             .iter()
             .enumerate()
             .filter_map(|(i, entry)| {
-                entry.as_ref().map(|e| TaskInfo { id: TaskId(i), name: e.name.clone(), state: e.state, ticks: e.ticks })
+                entry.as_ref().map(|e| TaskInfo {
+                    id: TaskId(i),
+                    name: e.name.clone(),
+                    state: e.state,
+                    ticks: e.ticks,
+                    recent_ticks: e.recent_ticks,
+                })
             })
             .collect()
     }
@@ -314,6 +357,42 @@ mod tests {
         queue.remove(TaskId(2));
         assert_eq!(order(&mut queue, 3), [0, 3, 0]);
         assert_eq!(queue.state(TaskId(2)), None);
+    }
+
+    #[test]
+    fn recent_cpu_use_covers_the_last_complete_window() {
+        let mut queue = queue();
+        let recent = |queue: &RunQueue| queue.tasks().iter().map(|t| t.recent_ticks).collect::<Vec<_>>();
+        // main runs the first quarter of a window, then a the rest.
+        for _ in 0..CPU_WINDOW / 4 {
+            queue.tick(0);
+        }
+        queue.pick_next(true);
+        for _ in 0..CPU_WINDOW / 4 * 3 - 1 {
+            queue.tick(0);
+        }
+        assert_eq!(recent(&queue), [0, 0, 0, 0]); // the window isn't over yet
+        queue.tick(0);
+        assert_eq!(recent(&queue), [CPU_WINDOW / 4, 0, CPU_WINDOW / 4 * 3, 0]);
+        // A whole window of a keeps the figures until it completes, then replaces them.
+        for _ in 0..CPU_WINDOW {
+            queue.tick(0);
+        }
+        assert_eq!(recent(&queue), [0, 0, CPU_WINDOW, 0]);
+    }
+
+    #[test]
+    fn interrupting_wakes_sleepers_and_waiters_only() {
+        let mut queue = queue();
+        queue.sleep_current(1_000);
+        assert!(queue.interrupt(TaskId(0)));
+        assert_eq!(queue.state(TaskId(0)), Some(State::Ready));
+        queue.wait_current(INPUT);
+        assert!(queue.interrupt(TaskId(0)));
+        queue.block_current();
+        assert!(!queue.interrupt(TaskId(0))); // a blocked task waits for its lock
+        assert!(!queue.interrupt(TaskId(2))); // ready already
+        assert!(!queue.interrupt(TaskId(99)));
     }
 
     #[test]

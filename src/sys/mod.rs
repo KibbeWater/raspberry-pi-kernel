@@ -21,7 +21,10 @@ pub const VERSION: &str = env!("GIT_VERSION");
 
 /// Period of the timer tick: the scheduler's time slice, and the resolution of
 /// `sched::sleep`.
-const TICK: Duration = Duration::from_millis(10);
+pub const TICK: Duration = Duration::from_millis(10);
+
+// `tasks` reports recent CPU use as "over the last second".
+const _: () = assert!(TICK.as_millis() * rustypi_core::sched::CPU_WINDOW as u128 == 1000);
 
 pub use rustypi_core::heap::Stats as HeapStats;
 pub use mailbox::MailboxError;

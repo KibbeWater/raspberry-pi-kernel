@@ -40,6 +40,8 @@ const CANARY: [u8; 16] = *b"RustyPI  canary!";
 const SPSR_EL1H: u64 = 0b0101;
 /// EL0 (the program uses SP_EL0) with all interrupts unmasked.
 const SPSR_EL0T: u64 = 0b0000;
+/// The SPSR bits that hold the exception level and stack pointer choice.
+const SPSR_MODE: u64 = 0b1111;
 
 struct Task {
     /// `None` for the boot task, which runs on the stack `linker.ld` reserves.
@@ -168,6 +170,35 @@ pub fn leave_user_space() {
         let task = scheduler.tasks[current.0].as_mut().expect("the running task exists");
         task.translation_base = mmu::kernel_translation_base();
         mmu::set_translation_base(task.translation_base);
+    });
+}
+
+/// Makes task `id`, if it is at EL0 (not in the middle of an exception or system call), run
+/// `entry` at EL1 on its kernel stack instead when it next resumes. Returns whether it did.
+pub fn redirect_to_kernel(id: TaskId, entry: extern "C" fn() -> !) -> bool {
+    SCHEDULER.lock(|scheduler| {
+        let Some(scheduler) = scheduler else { return false };
+        let Some(task) = scheduler.tasks.get(id.0).and_then(Option::as_ref) else { return false };
+        if id == scheduler.queue.current() || task.context.is_null() {
+            return false;
+        }
+        // Not running, so its registers are in the context it was switched away in.
+        let context = unsafe { &mut *task.context };
+        if context.spsr & SPSR_MODE != SPSR_EL0T {
+            return false;
+        }
+        context.elr = entry as usize as u64;
+        context.spsr = SPSR_EL1H;
+        true
+    })
+}
+
+/// Cuts a sleep or wait of task `id` short, so it notices something has changed.
+pub fn interrupt(id: TaskId) {
+    SCHEDULER.lock(|scheduler| {
+        if let Some(scheduler) = scheduler {
+            scheduler.queue.interrupt(id);
+        }
     });
 }
 
