@@ -16,12 +16,12 @@ mod programs;
 
 pub use programs::{Program, PROGRAMS};
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::Arc;
 use core::fmt;
 use core::time::Duration;
-use rustypi_abi::{encode_result, Errno, Registers, Syscall, MAX_WRITE, SVC_SYSCALL};
+use rustypi_abi::{encode_result, Errno, Registers, Syscall, MAX_READ, MAX_WRITE, SVC_SYSCALL};
 use rustypi_abi::layout::{MAX_ARGS, PROGRAM_END, STACK_SIZE, STACK_TOP, USER_BASE};
 use rustypi_core::elf;
 use rustypi_core::paging::{Access, AddressSpace, MapError, PAGE_SIZE};
@@ -147,7 +147,12 @@ struct Running {
     killed: bool,
     /// Where its heap ends: the next `Map` starts here.
     heap_end: u64,
+    /// Input sent to it and not read yet.
+    input: VecDeque<u8>,
 }
+
+/// Most bytes of unread input a program can have waiting.
+const MAX_INPUT: usize = 4096;
 
 /// Running programs, by task.
 static PROCESSES: IrqLock<BTreeMap<TaskId, Running>> = IrqLock::new(BTreeMap::new());
@@ -225,6 +230,7 @@ pub fn spawn(name: &str, code: Code, args: &str) -> Result<Process, SpawnError> 
         exit: exit.clone(),
         killed: false,
         heap_end: program_end.next_multiple_of(PAGE_SIZE as u64),
+        input: VecDeque::new(),
     };
     // Registered under the lock, so the program can't make a system call before it is known.
     let id = PROCESSES.lock(|processes| {
@@ -233,6 +239,42 @@ pub fn spawn(name: &str, code: Code, args: &str) -> Result<Process, SpawnError> 
         id
     });
     Ok(Process { id, exit })
+}
+
+/// Whether a program is running as task `id`.
+pub fn is_running(id: TaskId) -> bool {
+    PROCESSES.lock(|processes| processes.contains_key(&id))
+}
+
+#[derive(Debug)]
+pub enum InputError {
+    NotAProgram,
+    /// It has `MAX_INPUT` bytes waiting already.
+    Full,
+}
+
+impl fmt::Display for InputError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            InputError::NotAProgram => write!(f, "not a running program"),
+            InputError::Full => write!(f, "input not taken: the program isn't reading"),
+        }
+    }
+}
+
+/// Gives the program running as task `id` a line of input, for its `Read`s.
+pub fn send_line(id: TaskId, line: &str) -> Result<(), InputError> {
+    PROCESSES.lock(|processes| {
+        let running = processes.get_mut(&id).ok_or(InputError::NotAProgram)?;
+        if running.input.len() + line.len() + 1 > MAX_INPUT {
+            return Err(InputError::Full);
+        }
+        running.input.extend(line.as_bytes());
+        running.input.push_back(b'\n');
+        Ok(())
+    })?;
+    sched::notify(sched::PROGRAM_INPUT);
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -318,7 +360,33 @@ fn syscall(call: Syscall) -> Result<u64, Errno> {
         }
         Syscall::Uptime => Ok(timer::now_us()),
         Syscall::Map { len } => map(len),
+        Syscall::Read { ptr, len } => read(ptr, len),
     }
+}
+
+/// Copies the running program's waiting input into its memory at `ptr`, waiting for some if
+/// there is none. A killed program stops waiting (and exits once the call returns).
+fn read(ptr: u64, len: u64) -> Result<u64, Errno> {
+    let id = sched::current();
+    let len = len.min(MAX_READ as u64) as usize;
+    if len == 0 {
+        return Ok(0);
+    }
+    sched::wait_until(sched::PROGRAM_INPUT, || {
+        PROCESSES.lock(|processes| processes.get(&id).is_none_or(|running| running.killed || !running.input.is_empty()))
+    });
+    PROCESSES.lock(|processes| {
+        let running = processes.get_mut(&id).expect("a user task has a process");
+        let mut buf = [0; MAX_READ];
+        let count = len.min(running.input.len());
+        for (slot, &byte) in buf.iter_mut().zip(running.input.iter()) {
+            *slot = byte;
+        }
+        // Only taken from the queue once it has landed.
+        running.memory.write_user(ptr, &buf[..count]).map_err(|_| Errno::Fault)?;
+        running.input.drain(..count);
+        Ok(count as u64)
+    })
 }
 
 /// Grows the running program's heap by `len` bytes, in whole pages, up to `PROGRAM_END`.

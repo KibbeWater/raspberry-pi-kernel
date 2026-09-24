@@ -4,6 +4,9 @@
 //! Every command is a `Command` in one of the `GROUPS` tables. `help` and the dispatcher
 //! both read those tables, so the help text can't drift from what is actually accepted.
 //! Handlers write their answer into a `session::Reply`.
+//!
+//! While a program runs in the foreground, lines go to it as input instead; a line starting
+//! with `!` is a command either way.
 
 mod led;
 mod memory;
@@ -14,7 +17,9 @@ mod system;
 mod tasks;
 
 use alloc::format;
+use rustypi_core::sched::TaskId;
 use rustypi_core::session::{LineKind, Reply};
+use crate::process;
 
 pub use system::Action;
 
@@ -80,15 +85,33 @@ fn usage(command: &Command) -> alloc::string::String {
 /// State that commands keep between calls.
 pub struct Shell {
     led: led::Led,
+    /// The program that gets typed lines as input, if it is still running.
+    foreground: Option<TaskId>,
 }
 
 impl Shell {
     pub fn new() -> Self {
-        Shell { led: led::Led::new() }
+        Shell { led: led::Led::new(), foreground: None }
     }
 
-    /// Runs one command line. Returns an action to perform after the reply is sent.
+    /// Runs one command line, or passes it to the foreground program. Returns an action to
+    /// perform after the reply is sent.
     pub fn handle<'a>(&mut self, text: &'a str, reply: &mut Reply) -> Option<Action<'a>> {
+        let text = match text.strip_prefix('!') {
+            Some(command) => command,
+            None => {
+                if let Some(id) = self.foreground {
+                    if process::is_running(id) {
+                        if let Err(error) = process::send_line(id, text) {
+                            reply.line(LineKind::Rsp, format_args!("task {}: {}", id.0, error));
+                        }
+                        return None;
+                    }
+                    self.foreground = None;
+                }
+                text
+            }
+        };
         let text = text.trim();
         let (name, args) = match text.split_once(char::is_whitespace) {
             Some((name, args)) => (name, args.trim()),

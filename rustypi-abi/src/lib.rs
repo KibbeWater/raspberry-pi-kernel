@@ -37,6 +37,9 @@ pub const SVC_SYSCALL: u16 = 0;
 /// Most bytes one `Write` takes. Longer writes are cut short, and return how much was written.
 pub const MAX_WRITE: usize = 256;
 
+/// Most bytes one `Read` returns.
+pub const MAX_READ: usize = 256;
+
 /// Identifies a system call, in x8.
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +50,7 @@ pub enum Number {
     Sleep = 3,
     Uptime = 4,
     Map = 5,
+    Read = 6,
 }
 
 impl Number {
@@ -58,6 +62,7 @@ impl Number {
             3 => Number::Sleep,
             4 => Number::Uptime,
             5 => Number::Map,
+            6 => Number::Read,
             _ => return None,
         })
     }
@@ -81,6 +86,10 @@ pub enum Syscall {
     /// follows straight on from the last. With `len` 0, returns where the next would start.
     /// `NoMemory` if the heap can't grow that far.
     Map { len: u64 },
+    /// Reads up to `len` bytes (at most `MAX_READ`) of input into `ptr`, waiting until there
+    /// is some. Returns how many were read. Input is what the user types while the program
+    /// runs in the foreground, a line at a time, each ending with `\n`.
+    Read { ptr: u64, len: u64 },
 }
 
 /// The registers a system call is made with.
@@ -101,6 +110,7 @@ impl Syscall {
             Syscall::Sleep { .. } => Number::Sleep,
             Syscall::Uptime => Number::Uptime,
             Syscall::Map { .. } => Number::Map,
+            Syscall::Read { .. } => Number::Read,
         }
     }
 
@@ -108,7 +118,7 @@ impl Syscall {
         let args = match *self {
             // Sign-extended, like any i32 in a 64-bit register.
             Syscall::Exit { code } => [code as i64 as u64, 0, 0, 0, 0, 0],
-            Syscall::Write { ptr, len } => [ptr, len, 0, 0, 0, 0],
+            Syscall::Write { ptr, len } | Syscall::Read { ptr, len } => [ptr, len, 0, 0, 0, 0],
             Syscall::Sleep { micros } => [micros, 0, 0, 0, 0, 0],
             Syscall::Map { len } => [len, 0, 0, 0, 0, 0],
             Syscall::Yield | Syscall::Uptime => [0; 6],
@@ -131,6 +141,7 @@ impl Syscall {
             Number::Sleep => Syscall::Sleep { micros: a0 },
             Number::Uptime => Syscall::Uptime,
             Number::Map => Syscall::Map { len: a0 },
+            Number::Read => Syscall::Read { ptr: a0, len: a1 },
         })
     }
 }
@@ -199,7 +210,7 @@ pub const fn decode_result(x0: u64) -> Result<u64, Errno> {
 mod tests {
     use super::*;
 
-    const ALL: [Syscall; 7] = [
+    const ALL: [Syscall; 8] = [
         Syscall::Exit { code: 0 },
         Syscall::Exit { code: -7 },
         Syscall::Write { ptr: 0x8000_0000, len: 12 },
@@ -207,6 +218,7 @@ mod tests {
         Syscall::Sleep { micros: 1_500 },
         Syscall::Uptime,
         Syscall::Map { len: 8192 },
+        Syscall::Read { ptr: 0x8000_1000, len: 64 },
     ];
 
     #[test]

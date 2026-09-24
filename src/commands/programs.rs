@@ -11,7 +11,7 @@ use crate::sys;
 
 pub const COMMANDS: &[Command] = &[
     Command { name: "programs", args: "[test]", description: "list built-in programs, or test them all", run: programs },
-    Command { name: "run", args: "<program> [args]", description: "start a program: a path, or built-in", run: run_program },
+    Command { name: "run", args: "<program> [args]", description: "start a program; a trailing & runs it in the background", run: run_program },
     Command { name: "kill", args: "<task>", description: "stop a running program", run: kill },
 ];
 
@@ -30,8 +30,13 @@ fn programs<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> 
 
 /// Starts an ELF program from the SD card (anything with a `/` is a path) or a built-in one,
 /// with the rest of the line as its arguments. Its output and exit follow as console lines:
-/// the reply can't wait for them.
-fn run_program<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+/// the reply can't wait for them. It runs in the foreground, getting typed lines as input,
+/// unless the line ends with `&`.
+fn run_program<'a>(shell: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+    let (args, background) = match args.strip_suffix('&') {
+        Some(args) => (args.trim_end(), true),
+        None => (args, false),
+    };
     let (program, args) = match args.split_once(char::is_whitespace) {
         Some((program, args)) => (program, args.trim()),
         None => (args, ""),
@@ -65,7 +70,17 @@ fn run_program<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'
         process::spawn(builtin.name, Code::Builtin(builtin), args)
     };
     match started {
-        Ok(process) => reply.line(LineKind::Rsp, format_args!("started {} as task {}", program, process.id().0)),
+        Ok(process) if background => {
+            reply.line(LineKind::Rsp, format_args!("started {} as task {} in the background", program, process.id().0));
+        }
+        Ok(process) => {
+            shell.foreground = Some(process.id());
+            reply.line(LineKind::Rsp, format_args!(
+                "started {} as task {}; typing goes to it, !<command> to the shell",
+                program,
+                process.id().0,
+            ));
+        }
         Err(error) => reply.line(LineKind::Rsp, format_args!("run: {}", error)),
     }
     Outcome::Done

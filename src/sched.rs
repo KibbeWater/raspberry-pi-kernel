@@ -30,6 +30,8 @@ pub const SVC_YIELD: u16 = 0;
 
 /// Bytes the UART received.
 pub const UART_RX: Event = Event(1);
+/// A program was sent input.
+pub const PROGRAM_INPUT: Event = Event(2);
 
 const STACK_SIZE: usize = 32 * 1024;
 /// Unused stack holds this byte, so the high-water mark can be measured.
@@ -191,6 +193,15 @@ pub fn redirect_to_kernel(id: TaskId, entry: extern "C" fn() -> !) -> bool {
         context.spsr = SPSR_EL1H;
         true
     })
+}
+
+/// Makes every task waiting for `event` (in `wait_until`) check again.
+pub fn notify(event: Event) {
+    SCHEDULER.lock(|scheduler| {
+        if let Some(scheduler) = scheduler {
+            scheduler.queue.notify(event);
+        }
+    });
 }
 
 /// Cuts a sleep or wait of task `id` short, so it notices something has changed.
