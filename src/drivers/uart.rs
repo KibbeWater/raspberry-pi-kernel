@@ -18,6 +18,9 @@ const UART_CR_RXE: u32 = 1 << 9;    // Receive enable
 const UART_LCRH_FEN: u32 = 1 << 4;          // FIFO enable
 const UART_LCRH_WLEN_8BIT: u32 = 3 << 5;      // 8‑bit word length
 
+/// PL011 reference clock. Pin it with `init_uart_clock=48000000` in config.txt.
+const UART_CLOCK_HZ: u32 = 48_000_000;
+
 /// Representation of the UART registers. Note that we only list
 /// the registers used in our code. The layout (with reserved words)
 /// is taken from the BCM2835 ARM Peripherals manual.
@@ -70,10 +73,10 @@ impl Uart {
     /// - Sets GPIO14 (TX) and GPIO15 (RX) to Alt0 (UART) mode.
     /// - Disables pull‑up/down on those pins via the GPIO module.
     /// - Clears pending interrupts.
-    /// - Configures 115200 baud, 8‑N‑1 (8 bits, no parity, 1 stop bit) with FIFOs enabled.
+    /// - Configures `baud`, 8‑N‑1 (8 bits, no parity, 1 stop bit) with FIFOs enabled.
     /// - Masks all interrupts.
     /// - Finally, enables the UART.
-    pub fn init() {
+    pub fn init(baud: u32) {
         let uart = uart_regs();
 
         // Disable UART while configuring.
@@ -92,12 +95,13 @@ impl Uart {
         // Clear all pending interrupts.
         write_reg(&mut uart.icr, 0x7FF);
 
-        // Calculate and set baud rate divisors for 115200 baud.
-        // With a UART clock of 48MHz:
-        //   divisor = 48000000 / (16 * 115200) ≈ 26.0416666...
-        //   -> Integer part: 26, Fractional part: round(0.0416666 * 64) = 3.
-        write_reg(&mut uart.ibrd, 26);
-        write_reg(&mut uart.fbrd, 3);
+        // Calculate and set baud rate divisors.
+        //   divisor = UART_CLOCK_HZ / (16 * baud), split into an integer part and a
+        //   6-bit fraction. In 1/64ths that is round(UART_CLOCK_HZ * 4 / baud).
+        //   e.g. 115200 -> 26 + 3/64, 38400 -> 78 + 8/64.
+        let divisor_x64 = (UART_CLOCK_HZ * 4 + baud / 2) / baud;
+        write_reg(&mut uart.ibrd, divisor_x64 >> 6);
+        write_reg(&mut uart.fbrd, divisor_x64 & 0x3F);
 
         // Enable FIFOs and configure 8‑bit word length, 1 stop bit, no parity.
         write_reg(&mut uart.lcrh, UART_LCRH_FEN | UART_LCRH_WLEN_8BIT);
