@@ -1,6 +1,7 @@
 //! Console output, and input typed while the program runs in the foreground.
 //!
-//! The console shows whole lines, so end prompts with a newline (`println!`).
+//! A prompt can go without a newline (`print!("> ")`): the bridge shows text that stops short
+//! after a moment.
 
 extern crate alloc;
 
