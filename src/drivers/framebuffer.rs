@@ -149,6 +149,18 @@ impl Framebuffer {
         }
     }
 
+    /// Draws a row of `0x00RRGGBB` pixels starting at (`x`, `y`), clipped to the screen.
+    pub fn draw_row(&mut self, x: usize, y: usize, pixels: &[u32]) {
+        if y >= self.height {
+            return;
+        }
+        let visible = self.width.saturating_sub(x).min(pixels.len());
+        for (i, &pixel) in pixels[..visible].iter().enumerate() {
+            let pixel = Color::from_rgb(pixel).encode(self.order);
+            self.write(x + i, y, pixel);
+        }
+    }
+
     pub fn clear(&mut self, color: Color) {
         self.fill_rect(0, 0, self.width, self.height, color);
     }

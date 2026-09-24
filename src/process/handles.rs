@@ -15,7 +15,9 @@ use rustypi_core::elf;
 use rustypi_core::fat::{self, EntryKind, FatError};
 use crate::sched;
 use crate::synchronization::interface::Mutex;
+use crate::sys::console::{self, LendError};
 use crate::sys::fs::{self, FsError};
+use rustypi_abi::ScreenSize;
 use super::pipe::{End, PipeEnd};
 use super::{copy_from_user, read_pipe, was_killed, write_pipe, Code, Exit, Io, Process, Running, SpawnError, Stream, PROCESSES};
 
@@ -24,6 +26,7 @@ enum Open {
     Dir { entries: Vec<fat::DirEntry>, position: usize },
     Child(Process),
     Pipe(PipeEnd),
+    Screen(console::Lease),
 }
 
 /// The first handle `Handles` gives out; below it are `INPUT` and `OUTPUT`.
@@ -140,7 +143,7 @@ pub(super) fn read(handle: u64, ptr: u64, len: u64) -> Result<u64, Errno> {
             Ok(count as u64)
         }
         Open::Dir { .. } => Err(Errno::IsADirectory),
-        Open::Child(_) | Open::Pipe(_) => Err(Errno::BadHandle),
+        Open::Child(_) | Open::Pipe(_) | Open::Screen(_) => Err(Errno::BadHandle),
     })
 }
 
@@ -198,8 +201,57 @@ pub(super) fn read_dir(handle: u64, entry: u64) -> Result<u64, Errno> {
             Ok(1)
         }
         Open::File { .. } => Err(Errno::NotADirectory),
-        Open::Child(_) | Open::Pipe(_) => Err(Errno::BadHandle),
+        Open::Child(_) | Open::Pipe(_) | Open::Screen(_) => Err(Errno::BadHandle),
     })
+}
+
+/// Takes the screen from the console, and writes its size to `size`.
+pub(super) fn open_screen(size: u64) -> Result<u64, Errno> {
+    with_running(|running| {
+        if !running.handles.has_room() {
+            return Err(Errno::TooMany);
+        }
+        let lease = console::lend().map_err(|error| match error {
+            LendError::NoScreen => Errno::NoDevice,
+            LendError::Busy => Errno::Busy,
+        })?;
+        let (width, height) = lease.size();
+        let bytes = ScreenSize { width: width as u32, height: height as u32 }.as_bytes();
+        // On failure the lease is dropped here, and the console gets the screen back.
+        running.memory.write_user(size, &bytes).map_err(|_| Errno::Fault)?;
+        running.handles.insert(Open::Screen(lease))
+    })
+}
+
+/// Draws a rectangle of the running program's pixels on the screen it holds, a row at a time.
+pub(super) fn draw(handle: u64, x: u64, y: u64, width: u64, height: u64, pixels: u64) -> Result<u64, Errno> {
+    let (screen_width, screen_height) = with_running(|running| match running.handles.get_mut(handle)? {
+        Open::Screen(lease) => Ok(lease.size()),
+        _ => Err(Errno::BadHandle),
+    })?;
+    // Only the part on the screen is copied in.
+    let (x, y) = (x.min(screen_width as u64) as usize, y.min(screen_height as u64) as usize);
+    let visible_width = (width as usize).min(screen_width - x);
+    let visible_height = (height as usize).min(screen_height - y);
+    let row_bytes = width.checked_mul(4).ok_or(Errno::Invalid)?;
+    let mut row = vec![0u8; visible_width * 4];
+    let mut words = vec![0u32; visible_width];
+    for r in 0..visible_height {
+        let at = pixels.checked_add(r as u64 * row_bytes).ok_or(Errno::Fault)?;
+        copy_from_user(at, &mut row)?;
+        for (word, bytes) in words.iter_mut().zip(row.chunks_exact(4)) {
+            *word = u32::from_le_bytes(bytes.try_into().unwrap());
+        }
+        // The handle might have been closed meanwhile only by this program, which is in here.
+        with_running(|running| match running.handles.get_mut(handle) {
+            Ok(Open::Screen(lease)) => {
+                lease.draw_row(x, y + r, &words);
+                Ok(())
+            }
+            _ => Err(Errno::BadHandle),
+        })?;
+    }
+    Ok(0)
 }
 
 /// Closing a child's handle lets it run on, unwatched.

@@ -22,6 +22,11 @@ impl Color {
         Color { r, g, b }
     }
 
+    /// From a `0x00RRGGBB` word, the layout programs draw with. The top byte is ignored.
+    pub const fn from_rgb(word: u32) -> Self {
+        Color { r: (word >> 16) as u8, g: (word >> 8) as u8, b: word as u8 }
+    }
+
     /// The 32-bit pixel for this colour. `RGB` puts red in the lowest byte, `BGR` blue; the
     /// top byte (alpha) is opaque.
     pub fn encode(self, order: PixelOrder) -> u32 {
@@ -33,6 +38,12 @@ impl Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_rgb_words() {
+        assert_eq!(Color::from_rgb(0xAA11_2233), Color::rgb(0x11, 0x22, 0x33));
+        assert_eq!(Color::from_rgb(0x00FF_8000).encode(PixelOrder::BGR), 0xFFFF_8000);
+    }
 
     #[test]
     fn encodes_channels_in_pixel_order() {

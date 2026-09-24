@@ -81,6 +81,8 @@ pub enum Number {
     Spawn = 12,
     Wait = 13,
     Pipe = 14,
+    OpenScreen = 15,
+    Draw = 16,
 }
 
 impl Number {
@@ -101,6 +103,8 @@ impl Number {
             12 => Number::Spawn,
             13 => Number::Wait,
             14 => Number::Pipe,
+            15 => Number::OpenScreen,
+            16 => Number::Draw,
             _ => return None,
         })
     }
@@ -156,6 +160,15 @@ pub enum Syscall {
     /// Makes a pipe, and writes its two handles to `ends`: the read end, then the write end,
     /// as two u64s.
     Pipe { ends: u64 },
+    /// Takes the screen: the kernel console stops drawing on it until the handle is closed
+    /// (or the program exits), when the console comes back. Writes its [`ScreenSize`] to
+    /// `size` and returns a handle for `Draw`. `Busy` if another program has it, `NoDevice`
+    /// if there is no screen.
+    OpenScreen { size: u64 },
+    /// Draws `width * height` pixels from `pixels`, row by row, with their top left corner at
+    /// (`x`, `y`). Each pixel is a u32 `0x00RRGGBB`, whatever the screen's own layout.
+    /// Whatever falls off the screen is left out.
+    Draw { handle: u64, x: u64, y: u64, width: u64, height: u64, pixels: u64 },
 }
 
 /// The registers a system call is made with.
@@ -185,6 +198,8 @@ impl Syscall {
             Syscall::Spawn { .. } => Number::Spawn,
             Syscall::Wait { .. } => Number::Wait,
             Syscall::Pipe { .. } => Number::Pipe,
+            Syscall::OpenScreen { .. } => Number::OpenScreen,
+            Syscall::Draw { .. } => Number::Draw,
         }
     }
 
@@ -195,6 +210,8 @@ impl Syscall {
             Syscall::Random { ptr, len } => [ptr, len, 0, 0, 0, 0],
             Syscall::Read { handle, ptr, len } | Syscall::Write { handle, ptr, len } => [handle, ptr, len, 0, 0, 0],
             Syscall::Pipe { ends } => [ends, 0, 0, 0, 0, 0],
+            Syscall::OpenScreen { size } => [size, 0, 0, 0, 0, 0],
+            Syscall::Draw { handle, x, y, width, height, pixels } => [handle, x, y, width, height, pixels],
             Syscall::Open { path, len } | Syscall::OpenDir { path, len } => [path, len, 0, 0, 0, 0],
             Syscall::ReadDir { handle, entry } => [handle, entry, 0, 0, 0, 0],
             Syscall::Close { handle } | Syscall::Wait { handle } => [handle, 0, 0, 0, 0, 0],
@@ -232,6 +249,8 @@ impl Syscall {
             Number::Spawn => Syscall::Spawn { path: a0, path_len: a1, args: a2, args_len: a3, input: a4, output: a5 },
             Number::Wait => Syscall::Wait { handle: a0 },
             Number::Pipe => Syscall::Pipe { ends: a0 },
+            Number::OpenScreen => Syscall::OpenScreen { size: a0 },
+            Number::Draw => Syscall::Draw { handle: a0, x: a1, y: a2, width: a3, height: a4, pixels: a5 },
         })
     }
 }
@@ -263,6 +282,10 @@ pub enum Errno {
     NotExecutable,
     /// Writing to a pipe that nobody reads any more.
     BrokenPipe,
+    /// There is no such device (like a screen, with no display attached).
+    NoDevice,
+    /// Someone else is using it.
+    Busy,
     /// A code this version of the ABI doesn't know, from a newer kernel.
     Unknown,
 }
@@ -283,6 +306,8 @@ impl Errno {
             Errno::Io => 10,
             Errno::NotExecutable => 11,
             Errno::BrokenPipe => 12,
+            Errno::NoDevice => 13,
+            Errno::Busy => 14,
             Errno::Unknown => 4095,
         }
     }
@@ -301,8 +326,27 @@ impl Errno {
             10 => Errno::Io,
             11 => Errno::NotExecutable,
             12 => Errno::BrokenPipe,
+            13 => Errno::NoDevice,
+            14 => Errno::Busy,
             _ => Errno::Unknown,
         }
+    }
+}
+
+/// The screen's size in pixels, as `OpenScreen` writes it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct ScreenSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl ScreenSize {
+    pub fn as_bytes(&self) -> [u8; 8] {
+        let mut bytes = [0; 8];
+        bytes[..4].copy_from_slice(&self.width.to_le_bytes());
+        bytes[4..].copy_from_slice(&self.height.to_le_bytes());
+        bytes
     }
 }
 
@@ -418,7 +462,7 @@ pub const fn decode_result(x0: u64) -> Result<u64, Errno> {
 mod tests {
     use super::*;
 
-    const ALL: [Syscall; 16] = [
+    const ALL: [Syscall; 18] = [
         Syscall::Exit { code: 0 },
         Syscall::Exit { code: -7 },
         Syscall::Write { handle: OUTPUT, ptr: 0x8000_0000, len: 12 },
@@ -435,6 +479,8 @@ mod tests {
         Syscall::Spawn { path: 0x8000_3000, path_len: 9, args: 0x8000_3100, args_len: 3, input: 5, output: OUTPUT },
         Syscall::Wait { handle: 4 },
         Syscall::Pipe { ends: 0x8000_5000 },
+        Syscall::OpenScreen { size: 0x8000_6000 },
+        Syscall::Draw { handle: 3, x: 10, y: 20, width: 64, height: 48, pixels: 0x8001_0000 },
     ];
 
     #[test]
@@ -488,6 +534,8 @@ mod tests {
             Errno::Io,
             Errno::NotExecutable,
             Errno::BrokenPipe,
+            Errno::NoDevice,
+            Errno::Busy,
         ]
         .map(Err);
         for result in [Ok(0), Ok(42), Ok(MAX_RESULT)].into_iter().chain(errors) {

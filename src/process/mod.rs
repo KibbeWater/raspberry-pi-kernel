@@ -451,6 +451,8 @@ fn syscall(call: Syscall) -> Result<u64, Errno> {
         Syscall::Map { len } => map(len),
         Syscall::Read { handle: INPUT, ptr, len } => read_input(ptr, len),
         Syscall::Pipe { ends } => handles::pipe(ends),
+        Syscall::OpenScreen { size } => handles::open_screen(size),
+        Syscall::Draw { handle, x, y, width, height, pixels } => handles::draw(handle, x, y, width, height, pixels),
         Syscall::Read { handle, ptr, len } => handles::read(handle, ptr, len),
         Syscall::Open { path, len } => handles::open(path, len),
         Syscall::OpenDir { path, len } => handles::open_dir(path, len),
