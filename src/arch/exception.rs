@@ -40,6 +40,12 @@ pub fn class(esr: u64) -> u64 {
     esr >> 26
 }
 
+/// Whether FAR_EL1 says something for this ESR_EL1 value: the address of a memory abort or a
+/// misaligned PC. For other exceptions it holds whatever it last did.
+pub fn has_fault_address(esr: u64) -> bool {
+    matches!(class(esr), 0x20 | 0x21 | 0x22 | 0x24 | 0x25)
+}
+
 /// Names the exception class of an ESR_EL1 value.
 pub fn class_name(esr: u64) -> &'static str {
     match class(esr) {

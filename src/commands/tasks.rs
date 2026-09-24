@@ -47,7 +47,8 @@ fn list(reply: &mut Reply) {
             info.name,
             info.state.name(),
             core,
-            info.recent_ticks * 100 / CPU_WINDOW,
+            // Other cores' ticks don't line up exactly with core 0's window.
+            (info.recent_ticks * 100 / CPU_WINDOW).min(100),
             cpu_ms / 1000,
             cpu_ms % 1000 / 100,
             stack,

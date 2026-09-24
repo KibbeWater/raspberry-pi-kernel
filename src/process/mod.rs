@@ -71,13 +71,13 @@ impl fmt::Display for Exit {
         match self {
             Exit::Code(code) => write!(f, "exited {code}"),
             Exit::Killed => write!(f, "killed"),
-            Exit::Crashed(fault) => write!(
-                f,
-                "crashed: {} at {:#x} (far {:#x})",
-                exception::class_name(fault.esr),
-                fault.pc,
-                fault.far,
-            ),
+            Exit::Crashed(fault) => {
+                write!(f, "crashed: {} at {:#x}", exception::class_name(fault.esr), fault.pc)?;
+                if exception::has_fault_address(fault.esr) {
+                    write!(f, " (far {:#x})", fault.far)?;
+                }
+                Ok(())
+            }
         }
     }
 }
