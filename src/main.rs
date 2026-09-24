@@ -13,11 +13,14 @@ mod sched;
 mod synchronization;
 mod sys;
 
+use alloc::collections::VecDeque;
+use alloc::string::String;
+use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 use commands::Shell;
 use drivers::uart::Uart;
 use link::{Link, Stats};
-use rustypi_core::session::Session;
+use rustypi_core::session::{self, Session};
 use synchronization::{interface::Mutex, IrqLock};
 
 /// Name announced in `HELLO` frames.
@@ -34,6 +37,22 @@ static LINK_STATS: IrqLock<Stats> = IrqLock::new(Stats {
     bad_frames: 0,
     overflows: 0,
 });
+
+/// What the link task hands the shell task.
+enum Inbound {
+    /// The Uno (re)started: its sequence numbers start over.
+    Hello,
+    /// A `MSG` frame's payload.
+    Msg(String),
+}
+
+/// Frames waiting for the shell task, oldest first.
+static INBOX: IrqLock<VecDeque<Inbound>> = IrqLock::new(VecDeque::new());
+/// More than this many waiting and new ones are dropped; the Uno retransmits.
+const INBOX_LIMIT: usize = 8;
+/// The sequence number of the request the shell has queued or is running, plus one; 0 for
+/// none. A retransmit of it is answered with `BUSY`.
+static PENDING: AtomicU32 = AtomicU32::new(0);
 
 /// Called by `arch/boot.s` on core 0 at EL1, once the stack and `.bss` are set up.
 #[no_mangle]
@@ -57,33 +76,80 @@ pub extern "C" fn kernel_main() -> ! {
 
     // From here on this is task 0, the shell.
     sched::init("shell");
+    sched::spawn("link", link_task);
     sched::spawn("stat", stat_task);
     sys::enable_interrupts();
     shell_task()
 }
 
-/// Answers frames from the Arduino, sleeping until the UART receives something.
-fn shell_task() -> ! {
-    let mut shell = Shell::new();
+/// Reads frames from the Arduino, sleeping until the UART receives something. Answers what
+/// it can itself, so the link stays responsive while the shell runs a slow command, and
+/// passes the rest to the shell task.
+fn link_task() {
     let mut link = Link::new();
-    let mut session = Session::new();
     loop {
         link.poll(|kind, payload| match kind {
             "PING" => link::send("PONG", payload),
             "HELLO" => {
-                session.reset();
+                PENDING.store(0, Ordering::Relaxed);
+                deliver(Inbound::Hello);
                 link::send("HELLO", NAME);
             }
-            "MSG" => {
-                let run = |text, reply: &mut _| shell.handle(text, reply);
-                if let Some(action) = session.handle(payload, run, link::send_fmt) {
-                    action.perform();
+            "MSG" => match session::request_seq(payload) {
+                // The shell has it already: tell the Uno to keep waiting.
+                Some(seq) if PENDING.load(Ordering::Relaxed) == seq as u32 + 1 => {
+                    link::send_fmt("BUSY", format_args!("{}", seq));
                 }
-            }
+                seq => {
+                    if let Some(seq) = seq {
+                        PENDING.store(seq as u32 + 1, Ordering::Relaxed);
+                    }
+                    // Without a sequence number, the session rejects it.
+                    deliver(Inbound::Msg(payload.into()));
+                }
+            },
             _ => link::send_fmt("ERR", format_args!("unknown kind {}", kind)),
         });
         LINK_STATS.lock(|stats| *stats = *link.stats());
         sched::wait_until(sched::UART_RX, Uart::has_input);
+    }
+}
+
+fn deliver(frame: Inbound) {
+    let queued = INBOX.lock(|inbox| {
+        let room = inbox.len() < INBOX_LIMIT;
+        if room {
+            inbox.push_back(frame);
+        }
+        room
+    });
+    if queued {
+        sched::notify(sched::SHELL_INBOX);
+    }
+}
+
+/// Runs the commands the link task passes on, one at a time, and sends their replies.
+fn shell_task() -> ! {
+    let mut shell = Shell::new();
+    let mut session = Session::new();
+    loop {
+        sched::wait_until(sched::SHELL_INBOX, || INBOX.lock(|inbox| !inbox.is_empty()));
+        let Some(frame) = INBOX.lock(|inbox| inbox.pop_front()) else { continue };
+        match frame {
+            Inbound::Hello => session.reset(),
+            Inbound::Msg(payload) => {
+                let run = |text, reply: &mut _| shell.handle(text, reply);
+                let action = session.handle(&payload, run, link::send_fmt);
+                // Replied: a retransmit now gets the cached reply rather than BUSY. Unless the
+                // Uno already sent its next request, which is pending now instead.
+                if let Some(seq) = session::request_seq(&payload) {
+                    let _ = PENDING.compare_exchange(seq as u32 + 1, 0, Ordering::Relaxed, Ordering::Relaxed);
+                }
+                if let Some(action) = action {
+                    action.perform();
+                }
+            }
+        }
     }
 }
 

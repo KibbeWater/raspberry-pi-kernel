@@ -32,6 +32,8 @@ pub const SVC_YIELD: u16 = 0;
 pub const UART_RX: Event = Event(1);
 /// A program was sent input.
 pub const PROGRAM_INPUT: Event = Event(2);
+/// The link task queued a frame for the shell.
+pub const SHELL_INBOX: Event = Event(3);
 
 const STACK_SIZE: usize = 32 * 1024;
 /// Unused stack holds this byte, so the high-water mark can be measured.

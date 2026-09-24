@@ -6,6 +6,10 @@
 //! `END,<seq>,<count>`. A request with the same `seq` as the last one handled is a
 //! retransmit, so its reply is resent from the cache instead of running the command
 //! twice (a retransmitted `led toggle` must not toggle again).
+//!
+//! A retransmit that arrives while its command is still running is answered with
+//! `BUSY,<seq>` (by the kernel's link task, which reads frames while the shell works), so
+//! the Uno keeps waiting instead of giving up on a slow command.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -112,6 +116,11 @@ impl Session {
     }
 }
 
+/// The sequence number of a `MSG` payload, without handling it.
+pub fn request_seq(payload: &str) -> Option<u16> {
+    parse_request(payload).map(|(seq, _)| seq)
+}
+
 /// Splits `<seq>,<text>`.
 fn parse_request(payload: &str) -> Option<(u16, &str)> {
     let (seq, text) = payload.split_once(',').unwrap_or((payload, ""));
@@ -213,6 +222,14 @@ mod tests {
         assert_eq!(runs, 0);
         // An empty command is fine.
         assert_eq!(exchange(&mut session, "3", &mut runs), ["RSP 3,0,echo: ", "END 3,1"]);
+    }
+
+    #[test]
+    fn request_seq_reads_the_sequence_number_only() {
+        assert_eq!(request_seq("42,led toggle"), Some(42));
+        assert_eq!(request_seq("7"), Some(7));
+        assert_eq!(request_seq("x,help"), None);
+        assert_eq!(request_seq("70000,help"), None);
     }
 
     #[test]
