@@ -6,19 +6,19 @@
 
 It arms the Pi with `update` on the console (port 2323), sends the image to port 2324 in
 acknowledged chunks with its CRC-32, and once the Pi has installed it (keeping the old one as
-/kernel8.bak) and rebooted, checks that `version` answers with the commit just built.
+/kernel8.bak) and rebooted, checks that `version` answers with the one in the image sent.
 """
 
 import argparse
 import os
 import socket
 import struct
-import subprocess
 import sys
 import time
 import zlib
 
-import pi
+sys.dont_write_bytecode = True  # no __pycache__ in the repo from importing pi
+import pi  # noqa: E402
 
 UPDATE_PORT = 2324
 CHUNK = 1024
@@ -44,13 +44,6 @@ def exchange(sock, address, datagram, accept, timeout=REPLY_TIMEOUT, retries=RET
             if accept(answer):
                 return answer
     sys.exit("deploy: no answer from the Pi")
-
-
-def expected_version(repo):
-    """The version string a kernel built from `repo` now reports, like build.rs makes it."""
-    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
-    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True).stdout.strip()
-    return f"RustyPI {commit}{'-dirty' if dirty else ''}"
 
 
 def console(host, line, first=5.0):
@@ -103,16 +96,17 @@ def main():
     exchange(sock, address, b"E", lambda a: a == b"F", timeout=INSTALL_TIMEOUT, retries=1)
     print("deploy: installed; the Pi is rebooting")
 
-    want = expected_version(repo)
     time.sleep(3)
     deadline = time.monotonic() + BOOT_TIMEOUT
     while time.monotonic() < deadline:
         answer = console(args.host, "!version", first=1.0).strip()
         if answer:
             print(f"deploy: back up: {answer}")
-            if os.path.abspath(args.image) == os.path.join(repo, "target", "kernel8.img") and answer != want:
-                print(f"deploy: expected {want}")
-                sys.exit(1)
+            # The version it reports is built into the image: finding it there says the Pi runs
+            # what was sent.
+            version = answer.removeprefix("RustyPI ").encode()
+            if version not in image:
+                sys.exit("deploy: that isn't the version in the image sent")
             return
         time.sleep(1)
     sys.exit("deploy: the Pi didn't come back (check the screen or the serial link)")

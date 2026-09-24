@@ -29,6 +29,9 @@ use crate::{println, sched};
 const LINK_CHECK: Duration = Duration::from_secs(1);
 /// How long a quiet network makes the task sleep between polls: the scheduler's tick.
 const IDLE_POLL: Duration = Duration::from_millis(10);
+/// After a frame arrives, the task keeps polling without sleeping this long: an exchange
+/// (an update's chunks, pings from elsewhere) goes at the network's pace, not the tick's.
+const BUSY_WINDOW_US: u64 = 50_000;
 /// How long to wait for USB to find the LAN7800 before giving up.
 const USB_WAIT: Duration = Duration::from_secs(20);
 
@@ -153,6 +156,8 @@ fn run(on_console: fn(String, Peer)) {
     let mut link_up = false;
     let mut failing = false;
     let mut updates = update::Receiver::new();
+    // Until when to poll without sleeping, after the last frame.
+    let mut busy_until = 0;
     // Once a new kernel is installed: when to reboot into it, after the answer has gone.
     let mut reboot_at = None;
     loop {
@@ -264,9 +269,13 @@ fn run(on_console: fn(String, Peer)) {
                 Event::Udp { .. } => {}
             }
         }
-        // Straight on while frames keep coming or an answer is due (so round trips are
-        // measured, not rounded up to ticks); otherwise a tick's rest, unless woken.
-        if frames.is_empty() && !interface.awaiting() {
+        // Straight on while frames keep coming (and a little after), or while an answer is
+        // due, so exchanges go at the network's pace and round trips are measured, not
+        // rounded up to ticks. Otherwise a tick's rest, unless woken.
+        if !frames.is_empty() {
+            busy_until = timer::now_us() + BUSY_WINDOW_US;
+        }
+        if timer::now_us() >= busy_until && !interface.awaiting() {
             sched::sleep(IDLE_POLL);
         } else {
             sched::yield_now();
