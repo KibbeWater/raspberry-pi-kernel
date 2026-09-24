@@ -50,11 +50,16 @@ const TCR: u64 = 32 | 1 << 8 | 1 << 10 | 3 << 12 | 1 << 23;
 /// SCTLR_EL1: M (MMU), C (data cache), I (instruction cache).
 const SCTLR_ENABLE: u64 = 1 << 0 | 1 << 2 | 1 << 12;
 
-/// Builds the page tables and turns on the MMU and caches.
+/// Builds the page tables, then turns on the MMU and caches on this core, core 0.
 ///
 /// Must run before anything that might make an unaligned access: until then all
 /// memory is Device memory, where unaligned accesses fault.
 pub fn enable() {
+    build_tables();
+    turn_on();
+}
+
+fn build_tables() {
     unsafe {
         let level2 = &raw mut LEVEL2;
         for (i, entry) in (*level2).0.iter_mut().enumerate() {
@@ -67,7 +72,13 @@ pub fn enable() {
         (*level1).0[0] = level2 as u64 | DESC_TABLE;
         // ARM local peripherals (core timers, mailboxes, interrupt routing).
         (*level1).0[1] = LOCAL_PERIPHERAL_BASE as u64 | DEVICE;
+    }
+}
 
+/// Turns on the MMU and caches on this core, with the tables `enable` built. For cores 1 to 3,
+/// which share core 0's tables: its first thing, like `enable` on core 0.
+pub fn turn_on() {
+    unsafe {
         asm!(
             "msr mair_el1, {mair}",
             "msr tcr_el1, {tcr}",
@@ -82,7 +93,7 @@ pub fn enable() {
             "isb",
             mair = in(reg) MAIR,
             tcr = in(reg) TCR,
-            ttbr = in(reg) level1 as u64,
+            ttbr = in(reg) &raw const LEVEL1 as u64,
             enable = in(reg) SCTLR_ENABLE,
             tmp = out(reg) _,
             options(nostack),
@@ -115,7 +126,7 @@ pub fn make_uncached(start: usize, len: usize) {
         for i in first..last {
             (*level2).0[i] = 0;
         }
-        asm!("dsb ishst", "tlbi vmalle1", "dsb ish", "isb", options(nostack));
+        asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack));
         for i in first..last {
             (*level2).0[i] = (i * BLOCK_2M) as u64 | NORMAL_UNCACHED;
         }
@@ -149,21 +160,21 @@ pub fn set_translation_base(ttbr0: u64) {
     }
 }
 
-/// Forgets every cached translation, for every ASID. Needed before freeing an address space's
-/// tables, or giving its ASID to another.
+/// Forgets every cached translation, for every ASID, on every core. Needed before freeing an
+/// address space's tables, or giving its ASID to another.
 pub fn flush_tlb() {
-    unsafe { asm!("dsb ishst", "tlbi vmalle1", "dsb ish", "isb", options(nostack)) };
+    unsafe { asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack)) };
 }
 
 /// Makes code just written to physical memory at `start..start + len` safe to execute:
-/// cleans it from the data cache to where instruction fetches see it, then drops the whole
-/// instruction cache, which may hold stale lines under other virtual addresses.
+/// cleans it from the data cache to where instruction fetches see it, then drops every core's
+/// whole instruction cache, which may hold stale lines under other virtual addresses.
 pub fn sync_instruction_cache(start: usize, len: usize) {
     unsafe {
         for line in (start & !(CACHE_LINE - 1)..start + len).step_by(CACHE_LINE) {
             asm!("dc cvau, {}", in(reg) line, options(nostack, preserves_flags));
         }
-        asm!("dsb ish", "ic iallu", "dsb ish", "isb", options(nostack));
+        asm!("dsb ish", "ic ialluis", "dsb ish", "isb", options(nostack));
     }
 }
 

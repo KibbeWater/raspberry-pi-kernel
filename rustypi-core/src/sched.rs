@@ -168,8 +168,15 @@ impl RunQueue {
         }
     }
 
-    fn is_idle(&self, id: TaskId) -> bool {
+    /// Whether `id` is a core's idle task.
+    pub fn is_idle(&self, id: TaskId) -> bool {
         self.idle.contains(&Some(id))
+    }
+
+    /// A started core other than `except` that is running its idle task, to hand a task that
+    /// just became ready.
+    pub fn idle_core(&self, except: usize) -> Option<usize> {
+        (0..self.current.len()).find(|&core| core != except && self.current[core].is_some_and(|id| self.is_idle(id)))
     }
 
     /// The current task of `core`, taking a pending interrupt if it has one.
@@ -595,6 +602,18 @@ mod tests {
         }
         let recent: Vec<u64> = queue.tasks().iter().map(|t| t.recent_ticks).collect();
         assert_eq!(recent, [CPU_WINDOW, 0, 0, CPU_WINDOW, 0]);
+    }
+
+    #[test]
+    fn idle_cores_can_be_found_to_hand_work() {
+        let mut queue = two_cores();
+        assert_eq!(queue.idle_core(0), Some(1));
+        assert_eq!(queue.idle_core(1), None); // core 0 runs main
+        queue.pick_next(1, false, none); // core 1 runs a
+        assert_eq!(queue.idle_core(0), None);
+        // Cores that haven't started are never picked.
+        let queue = RunQueue::new("main", 4);
+        assert_eq!(queue.idle_core(0), None);
     }
 
     #[test]

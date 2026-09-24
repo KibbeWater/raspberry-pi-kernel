@@ -81,6 +81,7 @@ pub extern "C" fn kernel_main() -> ! {
     sched::spawn("link", link_task);
     sched::spawn("stat", stat_task);
     sys::enable_interrupts();
+    println!("cores: {} of {} running", sys::cores::start(), board::CORES);
     shell_task()
 }
 

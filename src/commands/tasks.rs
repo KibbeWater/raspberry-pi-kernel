@@ -7,7 +7,8 @@ use core::time::Duration;
 use rustypi_core::sched::CPU_WINDOW;
 use rustypi_core::session::{LineKind, Reply};
 use super::{Command, Outcome, Shell};
-use crate::sched;
+use crate::board::CORES;
+use crate::{arch, sched};
 use crate::synchronization::{interface::Mutex as _, IrqLock, Mutex};
 use crate::sys;
 
@@ -30,8 +31,8 @@ fn tasks<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
 /// Every task, with its CPU use over the last second and in total.
 fn list(reply: &mut Reply) {
     reply.line(LineKind::Rsp, format_args!(
-        "{:>3}  {:<10} {:<9} {:>4} {:>9}  {}",
-        "id", "name", "state", "cpu", "time", "stack",
+        "{:>3}  {:<10} {:<9} {:>4} {:>4} {:>9}  {}",
+        "id", "name", "state", "core", "cpu", "time", "stack",
     ));
     for (info, stack) in sched::tasks() {
         let cpu_ms = info.ticks * sys::TICK.as_millis() as u64;
@@ -39,11 +40,13 @@ fn list(reply: &mut Reply) {
             Some((used, size)) => format!("{}.{}/{} KB", used / 1024, used % 1024 * 10 / 1024, size / 1024),
             None => "boot stack".into(),
         };
+        let core = info.core.map_or("-".into(), |core| format!("{core}"));
         reply.line(LineKind::Rsp, format_args!(
-            "{:>3}  {:<10} {:<9} {:>3}% {:>6}.{}s  {}",
+            "{:>3}  {:<10} {:<9} {:>4} {:>3}% {:>6}.{}s  {}",
             info.id.0,
             info.name,
             info.state.name(),
+            core,
             info.recent_ticks * 100 / CPU_WINDOW,
             cpu_ms / 1000,
             cpu_ms % 1000 / 100,
@@ -52,7 +55,8 @@ fn list(reply: &mut Reply) {
     }
 }
 
-const WORKERS: usize = 3;
+/// More than there are cores, so they have to take turns.
+const WORKERS: usize = CORES + 2;
 const WORK_TIME: Duration = Duration::from_millis(200);
 /// A jump in the clock this long between two loop iterations means another task ran.
 const PREEMPTED_GAP_US: u64 = 2_000;
@@ -62,17 +66,21 @@ struct WorkerResult {
     start_us: u64,
     end_us: u64,
     preemptions: u32,
+    /// Bit n set if it ran on core n.
+    cores: u32,
 }
 
 static RESULTS: IrqLock<[Option<WorkerResult>; WORKERS]> = IrqLock::new([None; WORKERS]);
 
 /// Spins `WORK_TIME` without ever yielding, counting how often the clock jumped because the
-/// scheduler switched to someone else.
+/// scheduler switched to someone else, and noting the cores it ran on.
 fn worker(index: usize) {
     let start = sys::uptime().as_micros() as u64;
     let mut last = start;
     let mut preemptions = 0;
+    let mut cores = 0;
     loop {
+        cores |= 1 << arch::core_id();
         let now = sys::uptime().as_micros() as u64;
         if now - last > PREEMPTED_GAP_US {
             preemptions += 1;
@@ -82,12 +90,13 @@ fn worker(index: usize) {
             break;
         }
     }
-    let result = WorkerResult { start_us: start, end_us: last, preemptions };
+    let result = WorkerResult { start_us: start, end_us: last, preemptions, cores };
     RESULTS.lock(|results| results[index] = Some(result));
 }
 
-/// Runs busy workers side by side: with preemption they overlap in time and each sees the
-/// others take turns; without it they'd run one after another.
+/// Runs more busy workers than there are cores: with preemption they overlap in time and each
+/// sees the others take turns; without it they'd run one after another. Between them they
+/// should use every core.
 fn preemption_test(reply: &mut Reply) {
     RESULTS.lock(|results| *results = [None; WORKERS]);
     let ids: Vec<_> = (0..WORKERS).map(|i| sched::spawn("worker", move || worker(i))).collect();
@@ -103,14 +112,18 @@ fn preemption_test(reply: &mut Reply) {
     let earliest_end = results.iter().map(|r| r.end_us).min().unwrap();
     let overlapped = latest_start < earliest_end;
     let all_preempted = results.iter().all(|r| r.preemptions > 0);
+    let cores = results.iter().fold(0, |cores, r| cores | r.cores).count_ones();
+    let fewest = results.iter().map(|r| r.preemptions).min().unwrap();
+    let most = results.iter().map(|r| r.preemptions).max().unwrap();
     reply.line(LineKind::Rsp, format_args!(
-        "tasks test {}: {} workers, overlapped {}, preempted {}/{}/{} times",
-        if overlapped && all_preempted { "passed" } else { "FAILED" },
+        "tasks test {}: {} workers on {}/{} cores, overlapped {}, preempted {}-{} times each",
+        if overlapped && all_preempted && cores == CORES as u32 { "passed" } else { "FAILED" },
         WORKERS,
+        cores,
+        CORES,
         if overlapped { "yes" } else { "no" },
-        results[0].preemptions,
-        results[1].preemptions,
-        results[2].preemptions,
+        fewest,
+        most,
     ));
 }
 

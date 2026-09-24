@@ -16,6 +16,7 @@
 //! that falls due meanwhile happens when the outermost `no_preempt` ends.
 
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::asm;
@@ -26,9 +27,9 @@ use crate::arch::exception::ExceptionContext;
 use crate::arch::fp::{self, FpState};
 use crate::arch::mmu;
 use crate::board::CORES;
-use crate::drivers::{interrupt, timer};
+use crate::drivers::{interrupt, local, timer};
 use crate::synchronization::{interface::Mutex, IrqLock};
-use crate::arch;
+use crate::{arch, sys};
 
 pub use rustypi_core::sched::TaskInfo;
 
@@ -108,6 +109,17 @@ pub fn init(name: &'static str) {
     spawn_kernel("idle0", Box::new(|| idle()), Some(0));
 }
 
+/// Turns the code running on this core, another than core 0, into its idle task. It then
+/// only runs when nothing else can: call `idle` from it once interrupts are set up.
+pub fn start_core() {
+    with_scheduler(|scheduler, core| {
+        let id = scheduler.queue.start_core(format!("idle{core}"), core);
+        scheduler.tasks.resize_with(id.0 + 1, || None);
+        scheduler.tasks[id.0] = Some(Task::new(None, core::ptr::null_mut(), mmu::kernel_translation_base()));
+    })
+    .expect("sched::init first");
+}
+
 /// What an idle task does: wait for an interrupt, over and over.
 pub fn idle() -> ! {
     loop {
@@ -182,16 +194,19 @@ fn spawn_task(
     let context = (top - size_of::<ExceptionContext>()) as *mut ExceptionContext;
     unsafe { context.write(start) };
 
-    SCHEDULER.lock(|scheduler| {
-        let scheduler = scheduler.as_mut().expect("sched::init first");
+    with_scheduler(|scheduler, core| {
         let id = match idle_for {
-            Some(core) => scheduler.queue.add_idle(name, core),
+            Some(idle_core) => scheduler.queue.add_idle(name, idle_core),
             None => scheduler.queue.add(name),
         };
         scheduler.tasks.resize_with(id.0 + 1, || None);
         scheduler.tasks[id.0] = Some(Task { fp, ..Task::new(Some(stack), context, translation_base) });
+        if idle_for.is_none() {
+            kick_idle_core(&scheduler.queue, core);
+        }
         id
     })
+    .expect("sched::init first")
 }
 
 extern "C" fn task_entry(entry: *mut Box<dyn FnOnce()>) -> ! {
@@ -251,15 +266,31 @@ fn redirect(context: &mut ExceptionContext, entry: extern "C" fn() -> !) -> bool
     true
 }
 
+/// Nudges a core that is idling, if there is one besides `core`, to pick up a task that just
+/// became ready now rather than at its next tick.
+fn kick_idle_core(queue: &RunQueue, core: usize) {
+    if let Some(idle) = queue.idle_core(core) {
+        local::send_ipi(idle);
+    }
+}
+
 /// Makes every task waiting for `event` (in `wait_until`) check again.
 pub fn notify(event: Event) {
-    with_queue(|queue, _| queue.notify(event));
+    with_queue(|queue, core| {
+        if queue.notify(event) {
+            kick_idle_core(queue, core);
+        }
+    });
 }
 
 /// Cuts a sleep or wait of task `id` short, so it notices something has changed. If it isn't
 /// asleep or waiting yet, its next sleep or wait is cut short instead.
 pub fn interrupt(id: TaskId) {
-    with_queue(|queue, _| queue.interrupt(id));
+    with_queue(|queue, core| {
+        if queue.interrupt(id) {
+            kick_idle_core(queue, core);
+        }
+    });
 }
 
 /// Ends the running task. Its stack is freed on a later switch.
@@ -312,7 +343,11 @@ pub fn block() {
 
 /// Makes a task blocked in `block` ready to run, or keeps it from blocking next time.
 pub fn wake(id: TaskId) {
-    with_queue(|queue, _| queue.wake(id));
+    with_queue(|queue, core| {
+        if queue.wake(id) {
+            kick_idle_core(queue, core);
+        }
+    });
 }
 
 /// Waits for task `id` to finish (or be gone already).
@@ -382,10 +417,13 @@ pub fn take_fp_registers() {
 
 /// Called from the IRQ vector: services the interrupts, then maybe switches tasks.
 pub fn on_irq(ctx: *mut ExceptionContext) -> *mut ExceptionContext {
+    sys::stop_if_another_core_panicked();
     let serviced = interrupt::handle();
     with_scheduler(|scheduler, core| {
-        if serviced.uart {
-            scheduler.queue.notify(UART_RX);
+        let running_idle = scheduler.queue.is_idle(scheduler.queue.current(core));
+        // If this core is busy, the link task (or whoever) gets an idle one.
+        if serviced.uart && scheduler.queue.notify(UART_RX) && !running_idle {
+            kick_idle_core(&scheduler.queue, core);
         }
         if serviced.timer {
             scheduler.queue.tick(core, timer::now_us());
@@ -458,6 +496,9 @@ impl Scheduler {
                     }
                 }
             }
+            // Its page table writes (a program growing its heap) complete before another
+            // core can pick it and walk them.
+            unsafe { asm!("dsb ish", options(nostack, preserves_flags)) };
             LEAVING[core].store(current.0 + 1, Ordering::Release);
         }
         let next_task = self.tasks[next.0].as_ref().expect("scheduled task exists");

@@ -42,14 +42,20 @@ fn is_pending(irq: Irq) -> bool {
 pub struct Serviced {
     pub timer: bool,
     pub uart: bool,
+    /// Another core nudged this one.
+    pub ipi: bool,
 }
 
 /// Runs the handler of every interrupt pending on this core. Called from the IRQ vector.
 pub fn handle() -> Serviced {
-    let sources = local::pending(arch::core_id());
-    let serviced = Serviced { timer: sources.timer, uart: sources.gpu && is_pending(Irq::Uart0) };
+    let core = arch::core_id();
+    let sources = local::pending(core);
+    let serviced = Serviced { timer: sources.timer, uart: sources.gpu && is_pending(Irq::Uart0), ipi: sources.ipi };
     if serviced.timer {
         arch::timer::rearm();
+    }
+    if serviced.ipi {
+        local::clear_ipi(core);
     }
     if serviced.uart {
         Uart::handle_interrupt();

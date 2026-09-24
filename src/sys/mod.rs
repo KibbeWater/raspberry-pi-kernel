@@ -4,12 +4,15 @@
 //! Code outside `drivers` should go through here rather than poking hardware.
 
 pub mod console;
+pub mod cores;
 pub mod fs;
 pub mod memory;
 pub mod print;
 pub mod random;
 mod heap;
 mod panic;
+
+pub use panic::stop_if_another_core_panicked;
 
 use core::time::Duration;
 use crate::arch;
@@ -53,9 +56,11 @@ pub fn enable_interrupts() {
     start_tick();
 }
 
-/// Starts this core's timer tick and unmasks its IRQs.
+/// Starts this core's timer tick and its wake-up interrupt, and unmasks its IRQs.
 fn start_tick() {
-    local::route_timer(arch::core_id());
+    let core = arch::core_id();
+    local::route_timer(core);
+    local::enable_ipi(core);
     arch::timer::start();
     arch::irq_enable();
 }
