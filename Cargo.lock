@@ -17,3 +17,13 @@ version = "0.1.0"
 [[package]]
 name = "rustypi-core"
 version = "0.1.0"
+dependencies = [
+ "rustypi-abi",
+]
+
+[[package]]
+name = "rustypi-user"
+version = "0.1.0"
+dependencies = [
+ "rustypi-abi",
+]

@@ -154,14 +154,17 @@ user_float:
     mov     x0, #0
     USER_SYSCALL {EXIT}
 
-// Stores x0 (1 or 2 in `programs test`, which runs two of these at once) on the stack,
-// sleeps while the other one does the same at the same address, and checks it is still
-// there. Exits 0 if it is.
+// Stores the first byte of its arguments ("1" or "2" in `programs test`, which runs two of
+// these at once) on the stack, sleeps while the other one does the same at the same
+// address, and checks it is still there. Exits 0 if it is.
 .balign 4
 .global user_isolated
 user_isolated:
-    mov     x19, x0
-    str     x0, [sp, #-16]!
+    mov     x19, #0
+    cbz     x1, .Lisolated_store
+    ldrb    w19, [x0]
+.Lisolated_store:
+    str     x19, [sp, #-16]!
     mov     x0, #50000              // 50ms
     USER_SYSCALL {SLEEP}
     ldr     x9, [sp], #16

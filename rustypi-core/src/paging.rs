@@ -3,7 +3,8 @@
 //!
 //! Every program gets a level 1 table of its own. It shares the kernel's entries, so the
 //! kernel stays mapped while it handles the program's exceptions (EL0 still can't touch it),
-//! and adds one entry for the user window: the 1GB at `USER_BASE`, mapped with 4KB pages
+//! and adds one entry for the user window, the 1GB at `USER_BASE` (`USER_BASE..USER_END`
+//! must be exactly one level 1 entry), mapped with 4KB pages
 //! through level 2 and level 3 tables that belong to the program.
 //!
 //! Pages are readable from EL0 and at most one of writable and executable: `Access` has no
@@ -17,10 +18,9 @@ use alloc::alloc::{alloc_zeroed, handle_alloc_error, Layout};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 
-pub const PAGE_SIZE: usize = 4096;
-/// The user window: all user memory lies in `USER_BASE..USER_END`, one level 1 entry.
-pub const USER_BASE: u64 = 0x8000_0000;
-pub const USER_END: u64 = 0xC000_0000;
+pub use rustypi_abi::layout::{USER_BASE, USER_END};
+
+pub const PAGE_SIZE: usize = rustypi_abi::layout::PAGE_SIZE as usize;
 
 const ENTRIES: usize = 512;
 const PAGE: u64 = PAGE_SIZE as u64;

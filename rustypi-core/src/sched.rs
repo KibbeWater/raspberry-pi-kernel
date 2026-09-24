@@ -4,6 +4,7 @@
 //! nothing else can. Stacks and context switching are the kernel's business; this only
 //! tracks task states.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -39,17 +40,17 @@ impl State {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct TaskInfo {
     pub id: TaskId,
-    pub name: &'static str,
+    pub name: Arc<str>,
     pub state: State,
     /// Timer ticks during which this task was running.
     pub ticks: u64,
 }
 
 struct Entry {
-    name: &'static str,
+    name: Arc<str>,
     state: State,
     ticks: u64,
 }
@@ -63,9 +64,9 @@ pub struct RunQueue {
 
 impl RunQueue {
     /// A queue whose only task is the one already running, which becomes task 0.
-    pub fn new(name: &'static str) -> Self {
+    pub fn new(name: impl Into<Arc<str>>) -> Self {
         RunQueue {
-            tasks: alloc::vec![Some(Entry { name, state: State::Running, ticks: 0 })],
+            tasks: alloc::vec![Some(Entry { name: name.into(), state: State::Running, ticks: 0 })],
             current: TaskId(0),
             idle: None,
         }
@@ -76,13 +77,13 @@ impl RunQueue {
     }
 
     /// Adds a ready task.
-    pub fn add(&mut self, name: &'static str) -> TaskId {
-        self.tasks.push(Some(Entry { name, state: State::Ready, ticks: 0 }));
+    pub fn add(&mut self, name: impl Into<Arc<str>>) -> TaskId {
+        self.tasks.push(Some(Entry { name: name.into(), state: State::Ready, ticks: 0 }));
         TaskId(self.tasks.len() - 1)
     }
 
     /// Adds the task that runs when nothing else can. It is never picked otherwise.
-    pub fn add_idle(&mut self, name: &'static str) -> TaskId {
+    pub fn add_idle(&mut self, name: impl Into<Arc<str>>) -> TaskId {
         let id = self.add(name);
         self.idle = Some(id);
         id
@@ -218,7 +219,7 @@ impl RunQueue {
             .iter()
             .enumerate()
             .filter_map(|(i, entry)| {
-                entry.as_ref().map(|e| TaskInfo { id: TaskId(i), name: e.name, state: e.state, ticks: e.ticks })
+                entry.as_ref().map(|e| TaskInfo { id: TaskId(i), name: e.name.clone(), state: e.state, ticks: e.ticks })
             })
             .collect()
     }

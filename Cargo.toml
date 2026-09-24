@@ -21,4 +21,4 @@ rustypi-abi = { path = "rustypi-abi" }
 rustypi-core = { path = "rustypi-core" }
 
 [workspace]
-members = ["rustypi-abi", "rustypi-core"]
+members = ["rustypi-abi", "rustypi-core", "rustypi-user"]

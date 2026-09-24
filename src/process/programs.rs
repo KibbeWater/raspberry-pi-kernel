@@ -109,7 +109,7 @@ pub const PROGRAMS: &[Program] = &[
     },
     Program {
         name: "isolated",
-        description: "keep x0 in memory across a sleep; run twice",
+        description: "keep its argument in memory across a sleep",
         expected: Expected::Exits(0),
         code: user_isolated,
     },

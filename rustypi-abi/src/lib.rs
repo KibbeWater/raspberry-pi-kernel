@@ -8,9 +8,28 @@
 //! the kernel `decode`s the registers back, so neither handles raw numbers. Arguments are
 //! always integers.
 //!
+//! A program starts at its ELF entry point with x0 pointing at its arguments (the rest of
+//! the command line, UTF-8) and x1 holding their length in bytes. They lie at the top of its
+//! stack, which the stack pointer starts just below.
+//!
 //! No dependencies and no allocation, so user programs can use it without a heap.
 
 #![cfg_attr(not(test), no_std)]
+
+/// Where things are in a program's address space.
+pub mod layout {
+    pub const PAGE_SIZE: u64 = 4096;
+    /// All user memory lies in `USER_BASE..USER_END`. Programs are linked to start here.
+    pub const USER_BASE: u64 = 0x8000_0000;
+    pub const USER_END: u64 = 0xC000_0000;
+    /// The stack ends a page below the top of the user window.
+    pub const STACK_TOP: u64 = USER_END - PAGE_SIZE;
+    pub const STACK_SIZE: u64 = 64 * 1024;
+    /// A program's segments must end by here, leaving an unmapped page below the stack.
+    pub const PROGRAM_END: u64 = STACK_TOP - STACK_SIZE - PAGE_SIZE;
+    /// Most bytes of arguments a program is started with.
+    pub const MAX_ARGS: usize = 1024;
+}
 
 /// The `svc` immediate for a system call.
 pub const SVC_SYSCALL: u16 = 0;

@@ -2,9 +2,11 @@
 //! User programs: tasks that run at EL0 and reach the kernel only through system calls
 //! (`rustypi_abi`). A program that faults is killed and the kernel carries on.
 //!
-//! Each program has its own address space (`rustypi_core::paging`) and ASID: its code,
-//! read-only and executable, at the start of the user window, and a stack just below the
-//! top. Everything else is unmapped, so running off either end of the stack faults.
+//! A program is a built-in test program or an ELF executable (`rustypi_core::elf`). Each
+//! has its own address space (`rustypi_core::paging`) and ASID: its segments from
+//! `USER_BASE`, and a stack just below the top of the window with its arguments on top, as
+//! `rustypi_abi` lays out. Everything else is unmapped, so running off either end of the
+//! stack faults.
 //!
 //! A system call runs like task code on the program's kernel stack, with interrupts enabled:
 //! it can sleep, block or be preempted like any kernel task, and its registers wait in the
@@ -15,11 +17,14 @@ mod programs;
 pub use programs::{Program, PROGRAMS};
 
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::sync::Arc;
 use core::fmt;
 use core::time::Duration;
 use rustypi_abi::{encode_result, Errno, Registers, Syscall, MAX_WRITE, SVC_SYSCALL};
-use rustypi_core::paging::{Access, AddressSpace, PAGE_SIZE, USER_BASE, USER_END};
+use rustypi_abi::layout::{MAX_ARGS, STACK_SIZE, STACK_TOP, USER_BASE};
+use rustypi_core::elf;
+use rustypi_core::paging::{Access, AddressSpace, PAGE_SIZE};
 use rustypi_core::sched::TaskId;
 use crate::arch::exception::{self, ExceptionContext, CLASS_SVC};
 use crate::arch::{self, mmu};
@@ -28,11 +33,8 @@ use crate::sched::{self, UserStart};
 use crate::synchronization::{interface::Mutex, IrqLock};
 use crate::{print, println};
 
-/// Where program code goes.
+/// Where built-in program code goes.
 const CODE_BASE: u64 = USER_BASE;
-/// The stack ends a page below the top of the window, with unmapped pages on either side.
-const STACK_TOP: u64 = USER_END - PAGE_SIZE as u64;
-const STACK_SIZE: u64 = 64 * 1024;
 
 /// How a program ended.
 #[derive(Clone, Copy, Debug)]
@@ -79,14 +81,25 @@ impl fmt::Display for Exit {
 pub enum SpawnError {
     /// Every ASID is taken.
     TooManyPrograms,
+    /// The arguments are longer than `MAX_ARGS`.
+    ArgsTooLong,
 }
 
 impl fmt::Display for SpawnError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             SpawnError::TooManyPrograms => write!(f, "too many programs running (at most {})", Asid::COUNT - 1),
+            SpawnError::ArgsTooLong => write!(f, "arguments longer than {} bytes", MAX_ARGS),
         }
     }
+}
+
+/// What a program runs.
+pub enum Code<'a> {
+    /// One of the built-in test programs.
+    Builtin(&'static Program),
+    /// A validated ELF executable.
+    Elf(&'a elf::Program<'a>),
 }
 
 /// An address space identifier, which tags the program's TLB entries. Given back when
@@ -118,7 +131,7 @@ impl Drop for Asid {
 
 /// What the kernel keeps about a running program.
 struct Running {
-    name: &'static str,
+    name: String,
     memory: AddressSpace,
     /// Held until the program is gone; only its release matters.
     _asid: Asid,
@@ -147,31 +160,52 @@ impl Process {
     }
 }
 
-/// Starts a built-in program in an address space of its own, with `arg` in x0.
-pub fn spawn(program: &Program, arg: u64) -> Result<Process, SpawnError> {
+/// Starts a program called `name` in an address space of its own, with `args`.
+pub fn spawn(name: &str, code: Code, args: &str) -> Result<Process, SpawnError> {
+    if args.len() > MAX_ARGS {
+        return Err(SpawnError::ArgsTooLong);
+    }
     let asid = Asid::allocate().ok_or(SpawnError::TooManyPrograms)?;
     let mut memory = AddressSpace::new(mmu::kernel_table());
 
-    let code = programs::image();
-    memory.map_range(CODE_BASE, code.len() as u64, Access::ReadExecute).expect("code fits the window");
-    memory.load(CODE_BASE, code).expect("code pages are mapped");
-    for va in (CODE_BASE..CODE_BASE + code.len() as u64).step_by(PAGE_SIZE) {
-        let (frame, _) = memory.translate(va).expect("code pages are mapped");
-        mmu::sync_instruction_cache(frame as usize, PAGE_SIZE);
+    // Nothing else is mapped yet, and ELF segments are checked to fit below the stack, so
+    // none of the mapping can collide.
+    let (entry, code_ranges) = match code {
+        Code::Builtin(program) => {
+            let code = programs::image();
+            memory.map_range(CODE_BASE, code.len() as u64, Access::ReadExecute).expect("code fits");
+            memory.load(CODE_BASE, code).expect("code pages are mapped");
+            (CODE_BASE + program.offset() as u64, alloc::vec![(CODE_BASE, code.len() as u64)])
+        }
+        Code::Elf(program) => {
+            program.load(&mut memory).expect("validated segments fit an empty address space");
+            let code = program.segments.iter().filter(|segment| segment.access == Access::ReadExecute);
+            (program.entry, code.map(|segment| (segment.address, segment.size)).collect())
+        }
+    };
+    for (start, len) in code_ranges {
+        for va in (start..start + len).step_by(PAGE_SIZE) {
+            let (frame, _) = memory.translate(va).expect("code pages are mapped");
+            mmu::sync_instruction_cache(frame as usize, PAGE_SIZE);
+        }
     }
-    memory.map_range(STACK_TOP - STACK_SIZE, STACK_SIZE, Access::ReadWrite).expect("stack fits the window");
+
+    // The arguments go at the top of the stack, which starts just below them.
+    memory.map_range(STACK_TOP - STACK_SIZE, STACK_SIZE, Access::ReadWrite).expect("stack fits");
+    let args_at = (STACK_TOP - args.len() as u64) & !15;
+    memory.load(args_at, args.as_bytes()).expect("stack pages are mapped");
 
     let start = UserStart {
         translation_base: memory.translation_base(asid.0),
-        entry: CODE_BASE + program.offset() as u64,
-        stack_top: STACK_TOP,
-        arg,
+        entry,
+        stack_top: args_at,
+        args: [args_at, args.len() as u64],
     };
     let exit = Arc::new(IrqLock::new(None));
-    let running = Running { name: program.name, memory, _asid: asid, exit: exit.clone() };
+    let running = Running { name: name.into(), memory, _asid: asid, exit: exit.clone() };
     // Registered under the lock, so the program can't make a system call before it is known.
     let id = PROCESSES.lock(|processes| {
-        let id = sched::spawn_user(program.name, start);
+        let id = sched::spawn_user(name, start);
         processes.insert(id, running);
         id
     });

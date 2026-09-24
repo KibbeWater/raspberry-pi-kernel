@@ -113,15 +113,15 @@ pub struct UserStart {
     pub translation_base: u64,
     pub entry: u64,
     pub stack_top: u64,
-    /// Passed in x0.
-    pub arg: u64,
+    /// Passed in x0 and x1.
+    pub args: [u64; 2],
 }
 
 /// Starts a task that runs a program at EL0. It leaves only through `exit`, called on its
 /// behalf by `process` after `leave_user_space`.
-pub fn spawn_user(name: &'static str, start: UserStart) -> TaskId {
+pub fn spawn_user(name: &str, start: UserStart) -> TaskId {
     let mut gpr = [0; 30];
-    gpr[0] = start.arg;
+    gpr[..2].copy_from_slice(&start.args);
     let context = ExceptionContext {
         gpr,
         lr: 0,
@@ -135,7 +135,7 @@ pub fn spawn_user(name: &'static str, start: UserStart) -> TaskId {
 }
 
 /// Adds a task whose first switch "returns" from an exception into `start`.
-fn spawn_task(name: &'static str, idle: bool, start: ExceptionContext, translation_base: u64) -> TaskId {
+fn spawn_task(name: &str, idle: bool, start: ExceptionContext, translation_base: u64) -> TaskId {
     let mut stack = vec![STACK_FILL; STACK_SIZE].into_boxed_slice();
     stack[..CANARY.len()].copy_from_slice(&CANARY);
 

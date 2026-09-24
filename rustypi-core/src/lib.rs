@@ -8,6 +8,7 @@ extern crate alloc;
 
 pub mod block;
 pub mod console;
+pub mod elf;
 pub mod fat;
 pub mod font;
 pub mod graphics;

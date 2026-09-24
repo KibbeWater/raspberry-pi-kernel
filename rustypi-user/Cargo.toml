@@ -1,0 +1,11 @@
+[package]
+name = "rustypi-user"
+version = "0.1.0"
+edition = "2021"
+description = "Runtime for RustyPI user programs: entry point, system calls, printing, panics"
+
+[dependencies]
+rustypi-abi = { path = "../rustypi-abi" }
+
+[build-dependencies]
+rustypi-abi = { path = "../rustypi-abi" }
