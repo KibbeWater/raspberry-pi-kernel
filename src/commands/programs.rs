@@ -35,10 +35,7 @@ fn programs<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> 
 /// exit follow as console lines: the reply can't wait for them. It runs in the foreground,
 /// getting typed lines as input, unless the line ends with `&`.
 fn run_program<'a>(shell: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
-    let (args, background) = match args.strip_suffix('&') {
-        Some(args) => (args.trim_end(), true),
-        None => (args, false),
-    };
+    let (args, background) = split_background(args);
     let (program, args) = match args.split_once(char::is_whitespace) {
         Some((program, args)) => (program, args.trim()),
         None => (args, ""),
@@ -51,6 +48,14 @@ fn run_program<'a>(shell: &mut Shell, args: &'a str, reply: &mut Reply) -> Outco
         None => reply.line(LineKind::Rsp, format_args!("run: no program '{}' in /bin or built in", program)),
     }
     Outcome::Done
+}
+
+/// Takes a trailing `&`, meaning "in the background", off a command line.
+pub(super) fn split_background(line: &str) -> (&str, bool) {
+    match line.strip_suffix('&') {
+        Some(line) => (line.trim_end(), true),
+        None => (line, false),
+    }
 }
 
 /// A program `run` can start.

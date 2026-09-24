@@ -5,8 +5,9 @@
 //! both read those tables, so the help text can't drift from what is actually accepted.
 //! Handlers write their answer into a `session::Reply`.
 //!
-//! While a program runs in the foreground, lines go to it as input instead; a line starting
-//! with `!` is a command either way.
+//! A line that isn't a command but names a program in `/bin` runs it, like `run`. While a
+//! program runs in the foreground, lines go to it as input instead; a line starting with `!`
+//! is a command either way.
 
 mod led;
 mod memory;
@@ -55,6 +56,7 @@ const HELP: &[Command] = &[Command {
             let usage = usage(command);
             reply.line(LineKind::Help, format_args!("{:<20} {}", usage, command.description));
         }
+        reply.line(LineKind::Help, format_args!("{:<20} {}", "<program> [args]", "run a program from /bin, like run"));
         Outcome::Done
     },
 }];
@@ -120,6 +122,9 @@ impl Shell {
         let Some(command) = commands().find(|command| command.name == name) else {
             if text.is_empty() {
                 reply.rsp("type help for a list of commands");
+            } else if let Some(target @ programs::Target::File(_)) = programs::find(name) {
+                let (args, background) = programs::split_background(args);
+                programs::start(self, target, args, background, reply);
             } else {
                 reply.line(LineKind::Rsp, format_args!("unknown command '{}', try help", name));
             }
