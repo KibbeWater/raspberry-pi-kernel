@@ -102,6 +102,16 @@ fn with_fs<R>(f: impl FnOnce(&mut Mounted) -> Result<R, FsError>) -> Result<R, F
     FS.lock(|fs| fs.as_mut().map_or(Err(FsError::NotMounted), f))
 }
 
+/// Like `with_fs`, for changing the volume: entries get the time now, if the clock knows it.
+fn with_fs_writing<R>(f: impl FnOnce(&mut Mounted) -> Result<R, FsError>) -> Result<R, FsError> {
+    with_fs(|fs| {
+        if let Some(now) = super::clock::now() {
+            fs.fat.set_time(now);
+        }
+        f(fs)
+    })
+}
+
 pub fn info() -> Result<MountInfo, FsError> {
     with_fs(|fs| Ok(fs.info.clone()))
 }
@@ -172,7 +182,7 @@ pub fn write_file(path: &str, data: &[u8]) -> Result<(), FsError> {
     if is_protected(path) {
         return Err(FsError::Protected);
     }
-    with_fs(|fs| Ok(fs.fat.write_file(path, data)?))
+    with_fs_writing(|fs| Ok(fs.fat.write_file(path, data)?))
 }
 
 /// Installs `image` as the kernel the Pi boots, `/kernel8.img`, copying the one there now to
@@ -180,7 +190,7 @@ pub fn write_file(path: &str, data: &[u8]) -> Result<(), FsError> {
 /// check the image first (`sys::update`). Each file is written crash-safely, so a failure
 /// part way leaves a bootable kernel.
 pub fn install_kernel(image: &[u8]) -> Result<(), FsError> {
-    with_fs(|fs| {
+    with_fs_writing(|fs| {
         match fs.fat.read_file("/kernel8.img") {
             Ok(old) => fs.fat.write_file("/kernel8.bak", &old)?,
             Err(FatError::NotFound) => {}
@@ -195,7 +205,7 @@ pub fn create_dir(path: &str) -> Result<(), FsError> {
     if is_protected(path) {
         return Err(FsError::Protected);
     }
-    with_fs(|fs| Ok(fs.fat.create_dir(path)?))
+    with_fs_writing(|fs| Ok(fs.fat.create_dir(path)?))
 }
 
 /// Removes a file or an empty directory, unless the Pi needs it to boot.
@@ -203,7 +213,7 @@ pub fn remove(path: &str) -> Result<(), FsError> {
     if is_protected(path) {
         return Err(FsError::Protected);
     }
-    with_fs(|fs| Ok(fs.fat.remove(path)?))
+    with_fs_writing(|fs| Ok(fs.fat.remove(path)?))
 }
 
 /// Free space on the volume, in bytes. Reads the whole FAT.

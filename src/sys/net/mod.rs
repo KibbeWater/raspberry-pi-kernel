@@ -1,17 +1,22 @@
-// net.rs
+// net/mod.rs
 //! Networking over the Pi 3 B+'s Ethernet: a task started at boot waits for USB to find the
 //! LAN7800, brings it up with the board's MAC address, and runs a
 //! `rustypi_core::net::interface::Interface` on it, which gets an address by DHCP and answers
 //! ARP and pings. `ping` sends pings of our own. Datagrams to UDP port 2323 are a console:
 //! each line is a shell command, and `reply` sends the answer back. Whoever sent the last one
 //! also gets a copy of everything printed (`mirror`), so programs work over it too. Port 2324
-//! takes a new kernel, once `update` has armed it (`sys::update`).
+//! takes a new kernel, once `update` has armed it (`sys::update`). Names are looked up with
+//! the DNS server DHCP gave (`resolve`), and the clock is set by SNTP (`lookup`).
+
+mod lookup;
+
+pub use lookup::{ResolveError, Resolved};
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use core::time::Duration;
 use rustypi_core::net::interface::{Config, Event, Interface};
 use rustypi_core::net::{Ipv4, Mac};
@@ -75,6 +80,10 @@ static STATUS: IrqLock<Status> = IrqLock::new(Status { state: State::Starting, m
 /// Pings `ping` asked for, and the answers the task got.
 static PING_REQUESTS: IrqLock<VecDeque<(Ipv4, u16)>> = IrqLock::new(VecDeque::new());
 static PING_REPLIES: IrqLock<VecDeque<(Ipv4, u16, u64)>> = IrqLock::new(VecDeque::new());
+/// Names commands asked to have looked up, and the answers, by request number.
+static RESOLVE_REQUESTS: IrqLock<VecDeque<lookup::Request>> = IrqLock::new(VecDeque::new());
+static RESOLVE_ANSWERS: IrqLock<VecDeque<(u32, Resolved)>> = IrqLock::new(VecDeque::new());
+static NEXT_REQUEST: AtomicU32 = AtomicU32::new(0);
 /// Console replies waiting to go out.
 static CONSOLE_OUT: IrqLock<VecDeque<(Peer, Vec<u8>)>> = IrqLock::new(VecDeque::new());
 /// The network task, plus one (0 until it starts), to wake when there is something to send.
@@ -156,6 +165,10 @@ fn run(on_console: fn(String, Peer)) {
     let mut link_up = false;
     let mut failing = false;
     let mut updates = update::Receiver::new();
+    let mut resolver = lookup::Resolver::new(super::random::u64() as u16);
+    let mut clock = lookup::ClockSync::new();
+    // Datagrams the lookups want sent: they go out with the next round of frames.
+    let mut datagrams: Vec<lookup::Datagram> = Vec::new();
     // Until when to poll without sleeping, after the last frame.
     let mut busy_until = 0;
     // Once a new kernel is installed: when to reboot into it, after the answer has gone.
@@ -187,6 +200,28 @@ fn run(on_console: fn(String, Peer)) {
         }
         while let Some((peer, data)) = CONSOLE_OUT.lock(|replies| replies.pop_front()) {
             out.extend(interface.send_udp(peer.address, peer.port, CONSOLE_PORT, &data, now));
+        }
+        let config = interface.config();
+        while let Some(request) = RESOLVE_REQUESTS.lock(|requests| requests.pop_front()) {
+            let started = match config {
+                None => Err(ResolveError::NoNetwork),
+                Some(Config { dns: None, .. }) => Err(ResolveError::NoServer),
+                Some(Config { dns: Some(server), .. }) => {
+                    resolver.start(&request.name, server, lookup::Purpose::Command(request.number), now, &mut datagrams)
+                }
+            };
+            if let Err(error) = started {
+                answer_lookup(request.number, Err(error));
+            }
+        }
+        if let Some(config) = config {
+            clock.poll(now, config.dns, &mut resolver, &mut datagrams);
+        }
+        for (purpose, result) in resolver.poll(now, &mut datagrams) {
+            finish_lookup(purpose, result, &mut clock, now, &mut datagrams);
+        }
+        for datagram in datagrams.drain(..) {
+            out.extend(interface.send_udp(datagram.to, datagram.port, datagram.from_port, &datagram.data, now));
         }
         let frames = match usb::with_bus(|host, _| lan.receive(host)) {
             Some(Ok(frames)) => {
@@ -266,6 +301,12 @@ fn run(on_console: fn(String, Peer)) {
                         }
                     }
                 }
+                Event::Udp { from, port: lookup::DNS_PORT, data, .. } => {
+                    if let Some((purpose, result)) = resolver.receive(from, &data) {
+                        finish_lookup(purpose, result, &mut clock, timer::now_us(), &mut datagrams);
+                    }
+                }
+                Event::Udp { from, port: lookup::SNTP_PORT, data, .. } => clock.receive(from, &data, timer::now_us()),
                 Event::Udp { .. } => {}
             }
         }
@@ -275,11 +316,54 @@ fn run(on_console: fn(String, Peer)) {
         if !frames.is_empty() {
             busy_until = timer::now_us() + BUSY_WINDOW_US;
         }
-        if timer::now_us() >= busy_until && !interface.awaiting() {
+        if timer::now_us() >= busy_until && !interface.awaiting() && datagrams.is_empty() {
             sched::sleep(IDLE_POLL);
         } else {
             sched::yield_now();
         }
+    }
+}
+
+/// Hands a lookup's result to whoever wanted it.
+fn finish_lookup(
+    purpose: lookup::Purpose,
+    result: Resolved,
+    clock: &mut lookup::ClockSync,
+    now: u64,
+    datagrams: &mut Vec<lookup::Datagram>,
+) {
+    match purpose {
+        lookup::Purpose::Command(number) => answer_lookup(number, result),
+        lookup::Purpose::Clock => clock.resolved(result, now, datagrams),
+    }
+}
+
+fn answer_lookup(number: u32, result: Resolved) {
+    RESOLVE_ANSWERS.lock(|answers| {
+        answers.push_back((number, result));
+        // Answers nobody waits for any more don't pile up.
+        while answers.len() > 16 {
+            answers.pop_front();
+        }
+    });
+}
+
+/// Looks `name` up with DNS: its IPv4 addresses. Waits for the answer (a few seconds at
+/// most, with retries).
+pub fn resolve(name: &str) -> Resolved {
+    let number = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+    RESOLVE_REQUESTS.lock(|requests| requests.push_back(lookup::Request { number, name: name.into() }));
+    wake();
+    loop {
+        let answer = RESOLVE_ANSWERS.lock(|answers| {
+            let index = answers.iter().position(|&(pending, _)| pending == number)?;
+            answers.remove(index)
+        });
+        if let Some((_, result)) = answer {
+            return result;
+        }
+        // The network task gives up on the server itself, so this ends.
+        sched::sleep(Duration::from_millis(5));
     }
 }
 

@@ -3,6 +3,7 @@
 //!
 //! Code outside `drivers` should go through here rather than poking hardware.
 
+pub mod clock;
 pub mod console;
 pub mod cores;
 pub mod fs;

@@ -10,7 +10,9 @@ use crate::sys::net::{Address, State};
 
 pub const COMMANDS: &[Command] = &[
     Command { name: "net", args: "", description: "Ethernet link, MAC and IP address", run: net },
-    Command { name: "ping", args: "<address> [count]", description: "ping an IPv4 address (4 times unless told)", run: ping },
+    Command { name: "ping", args: "<host> [count]", description: "ping a name or IPv4 address (4 times unless told)", run: ping },
+    Command { name: "host", args: "<name>", description: "look a name up with DNS", run: host },
+    Command { name: "date", args: "", description: "the date and time (UTC), once the network has set the clock", run: date },
     Command { name: "update", args: "", description: "take a new kernel over the network for a minute (tools/deploy.py)", run: update },
 ];
 
@@ -71,10 +73,49 @@ fn net<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     Outcome::Done
 }
 
+fn host<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+    if args.is_empty() || args.contains(char::is_whitespace) {
+        return Outcome::Usage;
+    }
+    match sys::net::resolve(args) {
+        Ok(addresses) => {
+            for address in addresses {
+                reply.line(LineKind::Rsp, format_args!("{args} has address {address}"));
+            }
+        }
+        Err(error) => reply.line(LineKind::Rsp, format_args!("host: {args}: {error}")),
+    }
+    Outcome::Done
+}
+
+fn date<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+    if !args.is_empty() {
+        return Outcome::Usage;
+    }
+    match sys::clock::now() {
+        Some(now) => reply.line(LineKind::Rsp, format_args!("{now} UTC")),
+        None => reply.rsp("date: the clock isn't set yet (it needs the network)"),
+    }
+    Outcome::Done
+}
+
 fn ping<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     let mut words = args.split_whitespace();
-    let Some(target) = words.next().and_then(Ipv4::parse) else {
+    let Some(name) = words.next() else {
         return Outcome::Usage;
+    };
+    let target = match Ipv4::parse(name) {
+        Some(address) => address,
+        None => match sys::net::resolve(name) {
+            Ok(addresses) => {
+                reply.line(LineKind::Rsp, format_args!("{} is {}", name, addresses[0]));
+                addresses[0]
+            }
+            Err(error) => {
+                reply.line(LineKind::Rsp, format_args!("ping: {name}: {error}"));
+                return Outcome::Done;
+            }
+        },
     };
     let count = match words.next().map(str::parse::<u16>) {
         None => 4,
