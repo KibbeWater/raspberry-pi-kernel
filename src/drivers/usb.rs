@@ -8,6 +8,7 @@
 //! LAN7800 Ethernet controller. Register names follow Circle's `dwhci.h`
 //! (<https://github.com/rsta2/circle>).
 
+use alloc::boxed::Box;
 use core::arch::asm;
 use core::fmt;
 use core::time::Duration;
@@ -291,8 +292,9 @@ pub struct Host {
 
 impl Host {
     /// Powers the controller on, resets it into host mode and brings up the root port. Takes a
-    /// second or so, sleeping in between.
-    pub fn start() -> Result<Host, UsbError> {
+    /// second or so, sleeping in between. Boxed from the start, so the DMA buffers inside never
+    /// move: a transfer the controller finishes late still lands where it was pointed.
+    pub fn start() -> Result<Box<Host>, UsbError> {
         let power = query::<SetPowerState>(&Mailbox, PowerState::on(DeviceId::USB_HCD))?;
         if !power.is_on() {
             return Err(UsbError::NoPower);
@@ -309,7 +311,7 @@ impl Host {
         init_core(hw_cfg2)?;
         init_host(hw_cfg2)?;
         let port = enable_root_port()?;
-        Ok(Host { controller, port, buffer: DmaBuffer::new(), bulk_in: DmaBuffer::new(), bulk_out: DmaBuffer::new() })
+        Ok(Box::new(Host { controller, port, buffer: DmaBuffer::new(), bulk_in: DmaBuffer::new(), bulk_out: DmaBuffer::new() }))
     }
 
     /// Waits `ms` milliseconds, letting other tasks run.
@@ -358,12 +360,6 @@ impl Host {
 
     /// One stage: `length` bytes from (OUT) or into (IN) the buffer. Returns how many moved.
     fn transfer(&mut self, target: Target, direction: Direction, pid: Pid, length: usize, stage: &'static str) -> Result<usize, UsbError> {
-        let n = CONTROL_CHANNEL;
-        // Halt it if a failed transfer left it going.
-        if read(channel(n, CHAN_CHARACTER)) & CHAR_ENABLE != 0 {
-            write(channel(n, CHAN_CHARACTER), read(channel(n, CHAN_CHARACTER)) | CHAR_DISABLE);
-            wait_for("a channel to halt", REGISTER_TIMEOUT_US, || read(channel(n, CHAN_INT)) & INT_HALTED != 0)?;
-        }
         match target.translator {
             None => self.direct_transfer(target, direction, pid, length, stage),
             Some(translator) => self.split_transfer(target, translator, direction, pid, length, stage),
@@ -640,6 +636,8 @@ impl Host {
     /// it to halt. Returns the channel's interrupt bits and how many of its bytes weren't moved.
     fn run_channel(&mut self, t: Transaction) -> Result<(u32, usize), UsbError> {
         let n = CONTROL_CHANNEL;
+        // In case anything left it going.
+        halt_channel(n);
         let (bus_address, clean): (u32, &dyn Fn()) = match t.buffer {
             Buffer::Control => (self.buffer.bus_address(), &|| self.buffer.clean_and_invalidate()),
             Buffer::BulkIn => (self.bulk_in.bus_address(), &|| self.bulk_in.clean_and_invalidate()),
@@ -667,7 +665,11 @@ impl Host {
         }
         write(channel(n, CHAN_CHARACTER), character | CHAR_ENABLE);
 
-        wait_for("a transfer", TRANSFER_TIMEOUT_US, || read(channel(n, CHAN_INT)) & INT_HALTED != 0)?;
+        if let Err(error) = wait_for("a transfer", TRANSFER_TIMEOUT_US, || read(channel(n, CHAN_INT)) & INT_HALTED != 0) {
+            // Stopped now, so it can't DMA into the buffer after we have given up on it.
+            halt_channel(n);
+            return Err(error);
+        }
         let interrupts = read(channel(n, CHAN_INT));
         // DMA may have written the buffer: drop anything the CPU cached of it meanwhile.
         clean();
@@ -742,6 +744,14 @@ fn interrupt_outcome(interrupts: u32) -> Result<Option<usize>, UsbError> {
         Ok(None)
     } else {
         Err(UsbError::Transfer { stage: "interrupt", interrupts })
+    }
+}
+
+/// Stops channel `n` if it is still going, and waits (briefly) until it has.
+fn halt_channel(n: usize) {
+    if read(channel(n, CHAN_CHARACTER)) & CHAR_ENABLE != 0 {
+        write(channel(n, CHAN_CHARACTER), read(channel(n, CHAN_CHARACTER)) | CHAR_ENABLE | CHAR_DISABLE);
+        let _ = wait_for("a channel to halt", REGISTER_TIMEOUT_US, || read(channel(n, CHAN_INT)) & INT_HALTED != 0);
     }
 }
 

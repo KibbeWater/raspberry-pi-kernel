@@ -7,6 +7,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use crate::board::STATUS_LED;
 use crate::drivers::gpio::{set_pin_mode, write_pin, Pin, PinMode};
+use core::fmt::Write;
+use crate::drivers::uart::UartWriter;
 use crate::{arch, println};
 
 /// The core that panicked, plus one; 0 while none has.
@@ -33,6 +35,11 @@ fn panic(info: &PanicInfo) -> ! {
         if first != me {
             stop_if_another_core_panicked();
         }
+        // This core panicked again while reporting (the kernel is too broken to format the
+        // report): say so without formatting anything, and reboot, keeping the first report
+        // readable.
+        let _ = UartWriter.write_str("\npanicked again while reporting a panic\n");
+        super::reboot();
     }
     println!("{}", info);
 

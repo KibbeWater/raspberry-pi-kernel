@@ -131,11 +131,11 @@ fn run(on_input: fn(Input)) {
     // Enumerated before taking the lock, which would otherwise be held for seconds.
     let scanned = Host::start().map_err(ScanError::Start).and_then(|mut host| {
         let speed = host.port.speed;
-        let tree = tree::enumerate(&mut host, speed).map_err(ScanError::Root)?;
+        let tree = tree::enumerate(&mut *host, speed).map_err(ScanError::Root)?;
         Ok((host, tree))
     });
     match scanned {
-        Ok((host, tree)) => USB.lock(|state| *state = State::Running { host: Box::new(host), tree }),
+        Ok((host, tree)) => USB.lock(|state| *state = State::Running { host, tree }),
         Err(error) => {
             println!("usb: {error}");
             USB.lock(|state| *state = State::Failed(error));

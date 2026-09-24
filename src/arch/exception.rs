@@ -82,13 +82,18 @@ extern "C" fn exception_sync(ctx: *mut ExceptionContext, _kind: u64) -> *mut Exc
     if class(esr) == CLASS_SVC && esr & 0xFFFF == sched::SVC_YIELD as u64 {
         return sched::on_yield(ctx);
     }
-    let ctx = unsafe { &*ctx };
+    let core = super::core_id();
+    let task = sched::running_on(core).map_or(usize::MAX, |task| task.0);
+    let context = unsafe { &*ctx };
     panic!(
-        "{} at {:#x} (esr {:#x}, far {:#x})",
-        class_name(ctx.esr),
-        ctx.elr,
-        ctx.esr,
+        "{} at {:#x} (esr {:#x}, far {:#x}) on core {}, task {}, sp {:#x}",
+        class_name(context.esr),
+        context.elr,
+        context.esr,
         far(),
+        core,
+        task,
+        ctx as usize,
     );
 }
 

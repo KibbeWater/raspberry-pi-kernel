@@ -50,6 +50,9 @@ const STACK_SIZE: usize = 32 * 1024;
 const STACK_FILL: u8 = 0x5A;
 /// Written at the bottom of every stack and checked on every switch away from the task.
 const CANARY: [u8; 16] = *b"RustyPI  canary!";
+/// Above the canary, this much of every stack must still hold `STACK_FILL` at each switch: a
+/// function with a big stack frame could jump past the canary alone without writing it.
+const STACK_GUARD: usize = 1024;
 /// EL1h (the task uses SP_EL1) with all interrupts unmasked.
 const SPSR_EL1H: u64 = 0b0101;
 /// EL0 (the program uses SP_EL0) with all interrupts unmasked.
@@ -96,6 +99,14 @@ static LEAVING: [AtomicUsize; CORES] = [const { AtomicUsize::new(0) }; CORES];
 /// Per core: `no_preempt` depth, and whether a switch fell due meanwhile.
 static PREEMPT_DISABLED: [AtomicU32; CORES] = [const { AtomicU32::new(0) }; CORES];
 static SWITCH_PENDING: [AtomicBool; CORES] = [const { AtomicBool::new(false) }; CORES];
+/// Per core, the task it runs, plus one: readable without the scheduler's lock, for fault
+/// reports (a fault may come while the lock is held).
+static RUNNING: [AtomicUsize; CORES] = [const { AtomicUsize::new(0) }; CORES];
+
+/// The task running on `core`, as last switched to, without taking any lock.
+pub fn running_on(core: usize) -> Option<TaskId> {
+    RUNNING[core].load(Ordering::Relaxed).checked_sub(1).map(TaskId)
+}
 
 /// Turns the code running on core 0 into task 0, `name`, and starts core 0's idle task. Call
 /// before enabling interrupts.
@@ -114,6 +125,7 @@ pub fn init(name: &'static str) {
 pub fn start_core() {
     with_scheduler(|scheduler, core| {
         let id = scheduler.queue.start_core(format!("idle{core}"), core);
+        RUNNING[core].store(id.0 + 1, Ordering::Relaxed);
         scheduler.tasks.resize_with(id.0 + 1, || None);
         scheduler.tasks[id.0] = Some(Task::new(None, core::ptr::null_mut(), mmu::kernel_translation_base()));
     })
@@ -467,6 +479,9 @@ impl Scheduler {
                 if stack[..CANARY.len()] != CANARY {
                     panic!("task {} overflowed its stack", current.0);
                 }
+                if stack[CANARY.len()..CANARY.len() + STACK_GUARD].iter().any(|&b| b != STACK_FILL) {
+                    panic!("task {} used all but the last {} bytes of its stack", current.0, STACK_GUARD);
+                }
             }
             // A kill that came while it ran: if it was at EL0, it goes to `exit` now.
             if let Some(entry) = task.redirect {
@@ -477,6 +492,7 @@ impl Scheduler {
         }
 
         let next = self.queue.pick_next(core, preempt, |id| leaving_elsewhere(core, id));
+        RUNNING[core].store(next.0 + 1, Ordering::Relaxed);
         // Free finished tasks' stacks, except the one being left, which this handler is
         // still running on, and any another core is leaving. They go on a later switch.
         for id in self.queue.finished() {
