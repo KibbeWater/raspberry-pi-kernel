@@ -16,8 +16,8 @@ use rustypi_core::mailbox::{Message, Transport};
 
 use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, Ordering};
 use crate::board::PERIPHERAL_BASE;
+use crate::synchronization::TryLock;
 
 const MBOX_BASE: usize = PERIPHERAL_BASE + 0xB880;
 /// Mailbox 0 carries firmware -> ARM replies.
@@ -35,28 +35,9 @@ const CACHE_LINE: usize = 64;
 /// Property tags channel, ARM -> VideoCore.
 const CHANNEL_PROPERTY: u32 = 8;
 
-/// Set while a call is in flight. The kernel runs on one core, so a call can only overlap
-/// another if an interrupt handler makes one; that is a bug, and it is caught here rather
-/// than by masking IRQs for the whole (possibly slow) firmware round trip.
-static IN_USE: AtomicBool = AtomicBool::new(false);
-
-struct InUseGuard;
-
-impl InUseGuard {
-    fn acquire() -> Self {
-        if IN_USE.load(Ordering::Acquire) {
-            panic!("mailbox: call started while another was in flight (from an interrupt handler?)");
-        }
-        IN_USE.store(true, Ordering::Release);
-        InUseGuard
-    }
-}
-
-impl Drop for InUseGuard {
-    fn drop(&mut self) {
-        IN_USE.store(false, Ordering::Release);
-    }
-}
+/// Held while a call is in flight. It keeps other tasks from preempting a call; finding it
+/// held means an interrupt handler started a call during another, which is a bug.
+static IN_FLIGHT: TryLock<()> = TryLock::new(());
 
 #[inline(always)]
 fn read(addr: usize) -> u32 {
@@ -86,21 +67,27 @@ pub struct Mailbox;
 
 impl Transport for Mailbox {
     fn call(&self, msg: &mut Message) {
-        let _guard = InUseGuard::acquire();
-        // Kernel memory lives in the low 1GB, so the address fits in 32 bits, and `Message`
-        // is 16-byte aligned, leaving the low four bits for the channel.
-        let value = msg.as_mut_ptr() as usize as u32 | CHANNEL_PROPERTY;
-
-        sync_message(msg);
-        while read(MBOX1_STATUS) & STATUS_FULL != 0 {}
-        write(MBOX1_WRITE, value);
-
-        loop {
-            while read(MBOX0_STATUS) & STATUS_EMPTY != 0 {}
-            if read(MBOX0_READ) == value {
-                break;
-            }
-        }
-        sync_message(msg);
+        IN_FLIGHT
+            .try_lock(|_| exchange(msg))
+            .expect("mailbox: call started while another was in flight (from an interrupt handler?)");
     }
+}
+
+/// Hands `msg` to the firmware and waits for it to answer in place.
+fn exchange(msg: &mut Message) {
+    // Kernel memory lives in the low 1GB, so the address fits in 32 bits, and `Message` is
+    // 16-byte aligned, leaving the low four bits for the channel.
+    let value = msg.as_mut_ptr() as usize as u32 | CHANNEL_PROPERTY;
+
+    sync_message(msg);
+    while read(MBOX1_STATUS) & STATUS_FULL != 0 {}
+    write(MBOX1_WRITE, value);
+
+    loop {
+        while read(MBOX0_STATUS) & STATUS_EMPTY != 0 {}
+        if read(MBOX0_READ) == value {
+            break;
+        }
+    }
+    sync_message(msg);
 }

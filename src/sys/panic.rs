@@ -15,9 +15,9 @@ fn panic(info: &PanicInfo) -> ! {
         set_pin_mode(led, PinMode::Output);
         for _ in 0..10 {
             write_pin(led, false);
-            super::sleep(Duration::from_millis(100));
+            super::delay(Duration::from_millis(100));
             write_pin(led, true);
-            super::sleep(Duration::from_millis(100));
+            super::delay(Duration::from_millis(100));
         }
     }
 

@@ -15,5 +15,6 @@ pub mod heap;
 pub mod link;
 pub mod mailbox;
 pub mod mbr;
+pub mod sched;
 pub mod sd;
 pub mod session;

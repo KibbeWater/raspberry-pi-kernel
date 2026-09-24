@@ -37,12 +37,21 @@ fn is_pending(irq: Irq) -> bool {
     unsafe { read_volatile(register as *const u32) & bit != 0 }
 }
 
+/// Which interrupts `handle` serviced.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Serviced {
+    pub timer: bool,
+    pub uart: bool,
+}
+
 /// Runs the handler of every pending interrupt. Called from the IRQ vector.
-pub fn handle() {
-    if is_pending(Irq::SystemTimer1) {
+pub fn handle() -> Serviced {
+    let serviced = Serviced { timer: is_pending(Irq::SystemTimer1), uart: is_pending(Irq::Uart0) };
+    if serviced.timer {
         timer::handle_interrupt();
     }
-    if is_pending(Irq::Uart0) {
+    if serviced.uart {
         Uart::handle_interrupt();
     }
+    serviced
 }

@@ -1,6 +1,6 @@
 ENTRY(_boot)
 
-STACK_SIZE = 0x4000;
+STACK_SIZE = 0x10000; /* 64KB for the boot task, which becomes the shell */
 HEAP_SIZE = 0x1000000; /* 16MB; NOLOAD, so it costs nothing in kernel8.img */
 
 SECTIONS

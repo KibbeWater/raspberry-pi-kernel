@@ -49,6 +49,8 @@ pub fn send(kind: &str, payload: &str) {
 /// link::send_fmt("RSP", format_args!("uptime {}s", secs));
 /// ```
 pub fn send_fmt(kind: &str, payload: fmt::Arguments) {
-    // UartWriter never returns an error.
-    let _ = frames::write_frame(&mut UartWriter, kind, payload);
+    crate::sys::print::serialized(|| {
+        // UartWriter never returns an error.
+        let _ = frames::write_frame(&mut UartWriter, kind, payload);
+    });
 }

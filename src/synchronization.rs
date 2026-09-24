@@ -12,7 +12,7 @@
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
-use crate::arch;
+use crate::{arch, sched};
 
 /// Synchronization interfaces.
 pub mod interface {
@@ -65,12 +65,12 @@ impl<T> interface::Mutex for IrqLock<T> {
 }
 
 /// A lock that never waits and never masks IRQs: if it is already held, `try_lock` gives up
-/// and returns `None`. For data that is slow to update, where losing an update is better than
-/// blocking interrupts, like the screen.
+/// and returns `None`. For data that is slow to update, where blocking interrupts would lose
+/// UART bytes, like the screen or the SD card.
 ///
-/// Only sound while the kernel runs on a single core. There, the only way to find it held is
-/// from an interrupt or exception that arrived while the holder was running, and that one
-/// always finishes (or never returns) before the holder continues.
+/// Holding it disables preemption, so no other task can find it held. Only an interrupt or
+/// exception handler that arrived while the holder was running can, and that one always
+/// finishes (or never returns) before the holder continues. Only sound on a single core.
 pub struct TryLock<T>
 where
     T: ?Sized,
@@ -96,9 +96,11 @@ impl<T> TryLock<T> {
         if self.locked.load(Ordering::Acquire) {
             return None;
         }
-        self.locked.store(true, Ordering::Release);
-        let result = f(unsafe { &mut *self.data.get() });
-        self.locked.store(false, Ordering::Release);
-        Some(result)
+        Some(sched::no_preempt(|| {
+            self.locked.store(true, Ordering::Release);
+            let result = f(unsafe { &mut *self.data.get() });
+            self.locked.store(false, Ordering::Release);
+            result
+        }))
     }
 }

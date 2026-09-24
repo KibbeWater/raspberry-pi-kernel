@@ -1,7 +1,9 @@
 // Exception vector table for EL1. Each entry saves the interrupted registers as an
-// `ExceptionContext` on the stack, calls a Rust handler with it, then restores them.
+// `ExceptionContext` on the stack and calls a Rust handler with it. The handler returns the
+// context to resume: usually the same one, or another task's saved context to switch to it.
 
-// Fills one 128-byte vector slot: \handler(ctx: &mut ExceptionContext, kind: u64).
+// Fills one 128-byte vector slot:
+// \handler(ctx: *mut ExceptionContext, kind: u64) -> *mut ExceptionContext.
 .macro VECTOR handler, kind
 .balign 0x80
     sub     sp, sp, #16 * 17
@@ -28,6 +30,7 @@
     mov     x0, sp
     mov     x1, #\kind
     bl      \handler
+    mov     sp, x0
     b       exception_restore
 .endm
 

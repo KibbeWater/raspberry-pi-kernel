@@ -19,8 +19,9 @@ use crate::drivers::uart::Uart;
 /// Git commit the kernel was built from, with `-dirty` for uncommitted changes.
 pub const VERSION: &str = env!("GIT_VERSION");
 
-/// Period of the timer tick. It wakes `idle` so the main loop runs at least this often.
-const TICK: Duration = Duration::from_millis(100);
+/// Period of the timer tick: the scheduler's time slice, and the resolution of
+/// `sched::sleep`.
+const TICK: Duration = Duration::from_millis(10);
 
 pub use rustypi_core::heap::Stats as HeapStats;
 pub use mailbox::MailboxError;
@@ -47,12 +48,6 @@ pub fn enable_interrupts() {
     arch::irq_enable();
 }
 
-/// Sleeps until an interrupt, unless UART input is already waiting. Wakes at least
-/// every `TICK`.
-pub fn idle() {
-    arch::wait_for_interrupt_unless(Uart::has_input);
-}
-
 /// Current exception level; 1 in normal operation.
 pub fn exception_level() -> u8 {
     arch::exception_level()
@@ -68,8 +63,9 @@ pub fn uptime() -> Duration {
     Duration::from_micros(timer::now_us())
 }
 
-/// Busy-waits for `duration`.
-pub fn sleep(duration: Duration) {
+/// Busy-waits for `duration` without letting other tasks run. For early boot and the panic
+/// handler; tasks should use `sched::sleep`.
+pub fn delay(duration: Duration) {
     timer::delay_us(duration.as_micros() as u64);
 }
 

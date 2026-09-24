@@ -2,13 +2,15 @@
 //! Rust side of the EL1 exception vectors in `exception.s`.
 //!
 //! Synchronous exceptions (bad memory accesses, undefined instructions, ...) are fatal:
-//! they are reported through the panic handler, which reboots. IRQs are handed to the
-//! interrupt controller driver.
+//! they are reported through the panic handler, which reboots. The exceptions are `svc #0`,
+//! which asks the scheduler to switch tasks, and IRQs; both go to the scheduler, which
+//! returns the context to resume.
 
 use core::arch::asm;
-use crate::drivers::interrupt;
+use crate::sched;
 
-/// Registers saved by `exception.s`, in the order it pushes them.
+/// Registers saved by `exception.s`, in the order it pushes them. A task that isn't running
+/// is exactly one of these on its stack.
 #[repr(C)]
 pub struct ExceptionContext {
     /// x0 to x29.
@@ -45,8 +47,16 @@ fn far() -> u64 {
     far
 }
 
+/// ESR_EL1 exception class of `svc` from AArch64.
+const CLASS_SVC: u64 = 0x15;
+
 #[no_mangle]
-extern "C" fn exception_sync(ctx: &mut ExceptionContext, _kind: u64) {
+extern "C" fn exception_sync(ctx: *mut ExceptionContext, _kind: u64) -> *mut ExceptionContext {
+    let esr = unsafe { (*ctx).esr };
+    if esr >> 26 == CLASS_SVC && esr & 0xFFFF == sched::SVC_YIELD as u64 {
+        return sched::on_yield(ctx);
+    }
+    let ctx = unsafe { &*ctx };
     panic!(
         "{} at {:#x} (esr {:#x}, far {:#x})",
         class_name(ctx.esr),
@@ -57,12 +67,13 @@ extern "C" fn exception_sync(ctx: &mut ExceptionContext, _kind: u64) {
 }
 
 #[no_mangle]
-extern "C" fn exception_irq(_ctx: &mut ExceptionContext, _kind: u64) {
-    interrupt::handle();
+extern "C" fn exception_irq(ctx: *mut ExceptionContext, _kind: u64) -> *mut ExceptionContext {
+    sched::on_irq(ctx)
 }
 
 #[no_mangle]
-extern "C" fn exception_unexpected(ctx: &mut ExceptionContext, kind: u64) {
+extern "C" fn exception_unexpected(ctx: *mut ExceptionContext, kind: u64) -> *mut ExceptionContext {
+    let ctx = unsafe { &*ctx };
     const KINDS: [&str; 4] = ["sync", "irq", "fiq", "serror"];
     const ORIGINS: [&str; 4] = ["el1 on sp_el0", "el1", "el0 aarch64", "el0 aarch32"];
     panic!(

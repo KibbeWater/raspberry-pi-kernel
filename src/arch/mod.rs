@@ -22,10 +22,12 @@ pub fn irq_enable() {
     unsafe { asm!("msr daifclr, #2", options(nostack)) };
 }
 
-/// Masks IRQs. Also a compiler barrier, so memory accesses stay inside the masked region.
-#[inline(always)]
-pub fn irq_disable() {
-    unsafe { asm!("msr daifset, #2", options(nostack)) };
+/// Whether IRQs are unmasked, i.e. this is task code rather than an exception handler or a
+/// masked section.
+pub fn irqs_enabled() -> bool {
+    let daif: u64;
+    unsafe { asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack)) };
+    daif & (1 << 7) == 0
 }
 
 /// Masks IRQs and returns the previous mask state, for `irq_restore`.
@@ -40,16 +42,4 @@ pub fn irq_save() -> u64 {
 #[inline(always)]
 pub fn irq_restore(daif: u64) {
     unsafe { asm!("msr daif, {}", in(reg) daif, options(nostack)) };
-}
-
-/// Sleeps until the next interrupt, unless `ready()` already holds.
-///
-/// IRQs are masked while checking, so an interrupt that arrives between the check and
-/// the `wfi` still wakes it; the handler then runs once IRQs are unmasked again.
-pub fn wait_for_interrupt_unless(ready: impl FnOnce() -> bool) {
-    irq_disable();
-    if !ready() {
-        unsafe { asm!("wfi", options(nostack)) };
-    }
-    irq_enable();
 }
