@@ -22,7 +22,7 @@ use alloc::sync::Arc;
 use core::fmt;
 use core::time::Duration;
 use rustypi_abi::{encode_result, Errno, Registers, Syscall, MAX_WRITE, SVC_SYSCALL};
-use rustypi_abi::layout::{MAX_ARGS, STACK_SIZE, STACK_TOP, USER_BASE};
+use rustypi_abi::layout::{MAX_ARGS, PROGRAM_END, STACK_SIZE, STACK_TOP, USER_BASE};
 use rustypi_core::elf;
 use rustypi_core::paging::{Access, AddressSpace, MapError, PAGE_SIZE};
 use rustypi_core::sched::TaskId;
@@ -145,6 +145,8 @@ struct Running {
     exit: Arc<IrqLock<Option<Exit>>>,
     /// Set by `kill`: it exits instead of returning from its current system call.
     killed: bool,
+    /// Where its heap ends: the next `Map` starts here.
+    heap_end: u64,
 }
 
 /// Running programs, by task.
@@ -179,12 +181,13 @@ pub fn spawn(name: &str, code: Code, args: &str) -> Result<Process, SpawnError> 
 
     // Nothing else is mapped yet, and ELF segments are checked to fit below the stack, so
     // mapping can only fail for want of memory.
-    let (entry, code_ranges) = match code {
+    let (entry, code_ranges, program_end) = match code {
         Code::Builtin(program) => {
             let code = programs::image();
             memory.map_range(CODE_BASE, code.len() as u64, Access::ReadExecute).map_err(out_of_memory)?;
             memory.load(CODE_BASE, code).expect("code pages are mapped");
-            (CODE_BASE + program.offset() as u64, alloc::vec![(CODE_BASE, code.len() as u64)])
+            let end = CODE_BASE + code.len() as u64;
+            (CODE_BASE + program.offset() as u64, alloc::vec![(CODE_BASE, code.len() as u64)], end)
         }
         Code::Elf(program) => {
             program.load(&mut memory).map_err(|error| match error {
@@ -192,7 +195,8 @@ pub fn spawn(name: &str, code: Code, args: &str) -> Result<Process, SpawnError> 
                 elf::LoadError::Access(fault) => unreachable!("loading a mapped segment faulted: {:?}", fault),
             })?;
             let code = program.segments.iter().filter(|segment| segment.access == Access::ReadExecute);
-            (program.entry, code.map(|segment| (segment.address, segment.size)).collect())
+            let end = program.segments.iter().map(elf::Segment::end).max().expect("programs have segments");
+            (program.entry, code.map(|segment| (segment.address, segment.size)).collect(), end)
         }
     };
     for (start, len) in code_ranges {
@@ -214,7 +218,14 @@ pub fn spawn(name: &str, code: Code, args: &str) -> Result<Process, SpawnError> 
         args: [args_at, args.len() as u64],
     };
     let exit = Arc::new(IrqLock::new(None));
-    let running = Running { name: name.into(), memory, _asid: asid, exit: exit.clone(), killed: false };
+    let running = Running {
+        name: name.into(),
+        memory,
+        _asid: asid,
+        exit: exit.clone(),
+        killed: false,
+        heap_end: program_end.next_multiple_of(PAGE_SIZE as u64),
+    };
     // Registered under the lock, so the program can't make a system call before it is known.
     let id = PROCESSES.lock(|processes| {
         let id = sched::spawn_user(name, start);
@@ -306,7 +317,34 @@ fn syscall(call: Syscall) -> Result<u64, Errno> {
             Ok(0)
         }
         Syscall::Uptime => Ok(timer::now_us()),
+        Syscall::Map { len } => map(len),
     }
+}
+
+/// Grows the running program's heap by `len` bytes, in whole pages, up to `PROGRAM_END`.
+/// Pages mapped before running out of memory stay mapped, past the returned heap end.
+fn map(len: u64) -> Result<u64, Errno> {
+    const PAGE: u64 = PAGE_SIZE as u64;
+    let id = sched::current();
+    // Only the program itself moves its heap end, and it is busy in here.
+    let start = PROCESSES.lock(|processes| processes.get(&id).expect("a user task has a process").heap_end);
+    let end = len
+        .div_ceil(PAGE)
+        .checked_mul(PAGE)
+        .and_then(|len| start.checked_add(len))
+        .filter(|&end| end <= PROGRAM_END)
+        .ok_or(Errno::NoMemory)?;
+    for va in (start..end).step_by(PAGE_SIZE) {
+        // A page per lock, so a big heap doesn't keep interrupts masked for long.
+        PROCESSES.lock(|processes| {
+            let running = processes.get_mut(&id).expect("a user task has a process");
+            running.memory.map(va, Access::ReadWrite)?;
+            running.heap_end = va + PAGE;
+            Ok(())
+        })
+        .map_err(|_: MapError| Errno::NoMemory)?;
+    }
+    Ok(start)
 }
 
 fn write(ptr: u64, len: u64) -> Result<u64, Errno> {

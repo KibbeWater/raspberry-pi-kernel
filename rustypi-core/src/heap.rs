@@ -66,6 +66,21 @@ impl Heap {
         unsafe { self.free(start, end - start) };
     }
 
+    /// Adds `start..end` to the heap, merging it with a free block that ends where it starts.
+    /// For growing a heap as more memory becomes available.
+    ///
+    /// # Safety
+    ///
+    /// As for `init`, and the range must not overlap memory the heap already has.
+    pub unsafe fn extend(&mut self, start: usize, end: usize) {
+        let start = align_up(start, BLOCK_ALIGN);
+        let end = end & !(BLOCK_ALIGN - 1);
+        if end > start {
+            self.total += end - start;
+            unsafe { self.free(start, end - start) };
+        }
+    }
+
     /// Allocates a block for `layout`, or returns null if none is free.
     ///
     /// # Safety
@@ -200,6 +215,24 @@ mod tests {
         assert_eq!(stats.used, 0);
         assert_eq!(stats.largest_free, stats.total);
         assert!(stats.total > SIZE - 32);
+    }
+
+    #[test]
+    fn extending_with_adjacent_memory_makes_one_bigger_block() {
+        let region = vec![0u8; 3 * SIZE].leak();
+        let start = region.as_mut_ptr() as usize;
+        let mut heap = Heap::empty();
+        unsafe { heap.init(start, start + SIZE) };
+        let big = layout(SIZE + SIZE / 2, 16);
+        assert!(unsafe { heap.alloc(big) }.is_null());
+
+        unsafe { heap.extend(start + SIZE, start + 2 * SIZE) };
+        assert_eq!(heap.stats().total, 2 * SIZE);
+        assert_eq!(heap.stats().largest_free, 2 * SIZE);
+        let block = unsafe { heap.alloc(big) };
+        assert_eq!(block as usize, start);
+        unsafe { heap.dealloc(block, big) };
+        assert_eq!(heap.stats().used, 0);
     }
 
     #[test]

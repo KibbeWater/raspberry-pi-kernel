@@ -115,6 +115,31 @@ user_abi:
     sub     x0, x0, x20
     cmp     x0, #1000
     b.lo    .Labi_fail
+    // 7: map grows the heap by a usable page, from where map 0 says it ends.
+    mov     x19, #7
+    mov     x0, #0
+    USER_SYSCALL {MAP}
+    mov     x20, x0
+    mov     x0, #0x1000
+    USER_SYSCALL {MAP}
+    cmp     x0, x20
+    b.ne    .Labi_fail
+    str     x19, [x20]
+    ldr     x9, [x20]
+    cmp     x9, x19
+    b.ne    .Labi_fail
+    mov     x0, #0
+    USER_SYSCALL {MAP}
+    sub     x0, x0, x20
+    cmp     x0, #0x1000
+    b.ne    .Labi_fail
+    // 8: a heap bigger than the address space is NoMemory.
+    mov     x19, #8
+    mov     x0, #1
+    lsl     x0, x0, #40
+    USER_SYSCALL {MAP}
+    cmn     x0, #{ENOMEM}
+    b.ne    .Labi_fail
     mov     x0, #0
     USER_SYSCALL {EXIT}
 .Labi_fail:

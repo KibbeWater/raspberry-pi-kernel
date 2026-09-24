@@ -14,9 +14,11 @@ global_asm!(
     WRITE = const Number::Write as u64,
     SLEEP = const Number::Sleep as u64,
     UPTIME = const Number::Uptime as u64,
+    MAP = const Number::Map as u64,
     ENOSYS = const Errno::NoSys.code(),
     EINVAL = const Errno::Invalid.code(),
     EFAULT = const Errno::Fault.code(),
+    ENOMEM = const Errno::NoMemory.code(),
 );
 
 extern "C" {

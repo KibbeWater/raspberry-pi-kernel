@@ -6,6 +6,8 @@ description = "Runtime for RustyPI user programs: entry point, system calls, pri
 
 [dependencies]
 rustypi-abi = { path = "../rustypi-abi" }
+# For its heap allocator; linking with LTO keeps only what is used.
+rustypi-core = { path = "../rustypi-core" }
 
 [build-dependencies]
 rustypi-abi = { path = "../rustypi-abi" }

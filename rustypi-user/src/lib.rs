@@ -17,9 +17,13 @@
 //!
 //! Main can return `()`, an `i32` exit code, or a `Result` whose error is printed (exit code
 //! 1). A panic prints its message and exits with code 101.
+//!
+//! There is a heap, which grows as needed: add `extern crate alloc;` to use `Vec`, `String`,
+//! `Box` and the rest of `alloc`.
 
 #![no_std]
 
+pub mod heap;
 pub mod io;
 pub mod syscall;
 pub mod time;
@@ -59,10 +63,10 @@ impl Termination for i32 {
     }
 }
 
-impl<E: fmt::Debug> Termination for Result<(), E> {
+impl<T: Termination, E: fmt::Debug> Termination for Result<T, E> {
     fn exit_code(self) -> i32 {
         match self {
-            Ok(()) => 0,
+            Ok(value) => value.exit_code(),
             Err(error) => {
                 println!("error: {:?}", error);
                 1

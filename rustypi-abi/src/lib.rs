@@ -46,6 +46,7 @@ pub enum Number {
     Yield = 2,
     Sleep = 3,
     Uptime = 4,
+    Map = 5,
 }
 
 impl Number {
@@ -56,6 +57,7 @@ impl Number {
             2 => Number::Yield,
             3 => Number::Sleep,
             4 => Number::Uptime,
+            5 => Number::Map,
             _ => return None,
         })
     }
@@ -74,6 +76,11 @@ pub enum Syscall {
     Sleep { micros: u64 },
     /// Returns the microseconds since the board was reset.
     Uptime,
+    /// Grows the program's heap by `len` bytes (rounded up to whole pages) of zeroed,
+    /// readable and writable memory. Returns where the new memory starts; each call's memory
+    /// follows straight on from the last. With `len` 0, returns where the next would start.
+    /// `NoMemory` if the heap can't grow that far.
+    Map { len: u64 },
 }
 
 /// The registers a system call is made with.
@@ -93,6 +100,7 @@ impl Syscall {
             Syscall::Yield => Number::Yield,
             Syscall::Sleep { .. } => Number::Sleep,
             Syscall::Uptime => Number::Uptime,
+            Syscall::Map { .. } => Number::Map,
         }
     }
 
@@ -102,6 +110,7 @@ impl Syscall {
             Syscall::Exit { code } => [code as i64 as u64, 0, 0, 0, 0, 0],
             Syscall::Write { ptr, len } => [ptr, len, 0, 0, 0, 0],
             Syscall::Sleep { micros } => [micros, 0, 0, 0, 0, 0],
+            Syscall::Map { len } => [len, 0, 0, 0, 0, 0],
             Syscall::Yield | Syscall::Uptime => [0; 6],
         };
         Registers { number: self.number() as u64, args }
@@ -121,6 +130,7 @@ impl Syscall {
             Number::Yield => Syscall::Yield,
             Number::Sleep => Syscall::Sleep { micros: a0 },
             Number::Uptime => Syscall::Uptime,
+            Number::Map => Syscall::Map { len: a0 },
         })
     }
 }
@@ -134,6 +144,8 @@ pub enum Errno {
     Invalid,
     /// A pointer argument points outside the program's memory.
     Fault,
+    /// There isn't enough memory, or room in the address space.
+    NoMemory,
     /// A code this version of the ABI doesn't know, from a newer kernel.
     Unknown,
 }
@@ -145,6 +157,7 @@ impl Errno {
             Errno::NoSys => 1,
             Errno::Invalid => 2,
             Errno::Fault => 3,
+            Errno::NoMemory => 4,
             Errno::Unknown => 4095,
         }
     }
@@ -154,6 +167,7 @@ impl Errno {
             1 => Errno::NoSys,
             2 => Errno::Invalid,
             3 => Errno::Fault,
+            4 => Errno::NoMemory,
             _ => Errno::Unknown,
         }
     }
@@ -185,13 +199,14 @@ pub const fn decode_result(x0: u64) -> Result<u64, Errno> {
 mod tests {
     use super::*;
 
-    const ALL: [Syscall; 6] = [
+    const ALL: [Syscall; 7] = [
         Syscall::Exit { code: 0 },
         Syscall::Exit { code: -7 },
         Syscall::Write { ptr: 0x8000_0000, len: 12 },
         Syscall::Yield,
         Syscall::Sleep { micros: 1_500 },
         Syscall::Uptime,
+        Syscall::Map { len: 8192 },
     ];
 
     #[test]
@@ -232,7 +247,8 @@ mod tests {
 
     #[test]
     fn results_survive_encoding() {
-        for result in [Ok(0), Ok(42), Ok(MAX_RESULT), Err(Errno::NoSys), Err(Errno::Invalid), Err(Errno::Fault)] {
+        let errors = [Errno::NoSys, Errno::Invalid, Errno::Fault, Errno::NoMemory].map(Err);
+        for result in [Ok(0), Ok(42), Ok(MAX_RESULT)].into_iter().chain(errors) {
             assert_eq!(decode_result(encode_result(result)), result);
         }
         assert_eq!(encode_result(Err(Errno::Fault)), -3i64 as u64);
