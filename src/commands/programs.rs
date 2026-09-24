@@ -1,17 +1,20 @@
 // programs.rs
 //! User programs: running them from the SD card or the built-in ones, and testing them.
 
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use rustypi_core::elf;
+use rustypi_core::fat::EntryKind;
 use rustypi_core::sched::TaskId;
 use rustypi_core::session::{LineKind, Reply};
 use super::{Command, Outcome, Shell};
-use crate::process::{self, Code, PROGRAMS};
+use crate::process::{self, Code, Program, PROGRAMS};
 use crate::sys;
 
 pub const COMMANDS: &[Command] = &[
     Command { name: "programs", args: "[test]", description: "list built-in programs, or test them all", run: programs },
-    Command { name: "run", args: "<program> [args]", description: "start a program; a trailing & runs it in the background", run: run_program },
+    Command { name: "run", args: "<program> [args]", description: "start a path, /bin program or built-in; & at the end: background", run: run_program },
     Command { name: "kill", args: "<task>", description: "stop a running program", run: kill },
 ];
 
@@ -28,10 +31,9 @@ fn programs<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> 
     Outcome::Done
 }
 
-/// Starts an ELF program from the SD card (anything with a `/` is a path) or a built-in one,
-/// with the rest of the line as its arguments. Its output and exit follow as console lines:
-/// the reply can't wait for them. It runs in the foreground, getting typed lines as input,
-/// unless the line ends with `&`.
+/// Starts a program with the rest of the line as its arguments; see `find`. Its output and
+/// exit follow as console lines: the reply can't wait for them. It runs in the foreground,
+/// getting typed lines as input, unless the line ends with `&`.
 fn run_program<'a>(shell: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     let (args, background) = match args.strip_suffix('&') {
         Some(args) => (args.trim_end(), true),
@@ -44,46 +46,62 @@ fn run_program<'a>(shell: &mut Shell, args: &'a str, reply: &mut Reply) -> Outco
     if program.is_empty() {
         return Outcome::Usage;
     }
+    match find(program) {
+        Some(target) => start(shell, target, args, background, reply),
+        None => reply.line(LineKind::Rsp, format_args!("run: no program '{}' in /bin or built in", program)),
+    }
+    Outcome::Done
+}
 
-    let started = if program.contains('/') {
-        let file = match sys::fs::read_file(program) {
-            Ok(file) => file,
-            Err(error) => {
-                reply.line(LineKind::Rsp, format_args!("run: {}: {}", program, error));
-                return Outcome::Done;
-            }
-        };
-        let elf = match elf::parse(&file) {
-            Ok(elf) => elf,
-            Err(error) => {
-                reply.line(LineKind::Rsp, format_args!("run: {}: {}", program, error.description()));
-                return Outcome::Done;
-            }
-        };
-        let name = program.rsplit('/').next().unwrap_or(program);
-        process::spawn(name, Code::Elf(&elf), args)
-    } else {
-        let Some(builtin) = PROGRAMS.iter().find(|builtin| builtin.name == program) else {
-            reply.line(LineKind::Rsp, format_args!("no built-in program '{}', see programs", program));
-            return Outcome::Done;
-        };
-        process::spawn(builtin.name, Code::Builtin(builtin), args)
+/// A program `run` can start.
+pub(super) enum Target {
+    File(String),
+    Builtin(&'static Program),
+}
+
+/// Finds a program by path (anything with a `/`), else as `/bin/<name>`, else built in.
+pub(super) fn find(program: &str) -> Option<Target> {
+    if program.contains('/') {
+        return Some(Target::File(program.into()));
+    }
+    let path = format!("/bin/{}", program);
+    if sys::fs::metadata(&path).is_ok_and(|entry| entry.kind == EntryKind::File) {
+        return Some(Target::File(path));
+    }
+    PROGRAMS.iter().find(|builtin| builtin.name == program).map(Target::Builtin)
+}
+
+/// Starts a program, in the foreground unless `background`, and says so in `reply`.
+pub(super) fn start(shell: &mut Shell, target: Target, args: &str, background: bool, reply: &mut Reply) {
+    let (started, name) = match &target {
+        Target::File(path) => {
+            let file = match sys::fs::read_file(path) {
+                Ok(file) => file,
+                Err(error) => return reply.line(LineKind::Rsp, format_args!("run: {}: {}", path, error)),
+            };
+            let elf = match elf::parse(&file) {
+                Ok(elf) => elf,
+                Err(error) => return reply.line(LineKind::Rsp, format_args!("run: {}: {}", path, error.description())),
+            };
+            let name = path.rsplit('/').next().unwrap_or(path);
+            (process::spawn(name, Code::Elf(&elf), args), path.as_str())
+        }
+        Target::Builtin(builtin) => (process::spawn(builtin.name, Code::Builtin(builtin), args), builtin.name),
     };
     match started {
         Ok(process) if background => {
-            reply.line(LineKind::Rsp, format_args!("started {} as task {} in the background", program, process.id().0));
+            reply.line(LineKind::Rsp, format_args!("started {} as task {} in the background", name, process.id().0));
         }
         Ok(process) => {
             shell.foreground = Some(process.id());
             reply.line(LineKind::Rsp, format_args!(
                 "started {} as task {}; typing goes to it, !<command> to the shell",
-                program,
+                name,
                 process.id().0,
             ));
         }
         Err(error) => reply.line(LineKind::Rsp, format_args!("run: {}", error)),
     }
-    Outcome::Done
 }
 
 fn kill<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
