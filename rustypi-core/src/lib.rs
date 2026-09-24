@@ -23,3 +23,4 @@ pub mod path;
 pub mod sched;
 pub mod sd;
 pub mod session;
+pub mod usb;
