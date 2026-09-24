@@ -49,13 +49,18 @@ pub const MAX_PATH: usize = 256;
 /// Biggest file `Open` takes, in bytes: the kernel reads it whole.
 pub const MAX_FILE: usize = 4 * 1024 * 1024;
 
-/// Most handles a program can have open at once (files, directories and children), besides
-/// `INPUT`.
+/// Most handles a program can have open at once (files, directories, children and pipe ends),
+/// besides `INPUT` and `OUTPUT`.
 pub const MAX_HANDLES: usize = 16;
 
-/// The handle every program starts with: what the user types while it runs in the
-/// foreground, a line at a time, each ending with `\n`.
+/// The handles every program starts with. `INPUT` is what the user types while it runs in
+/// the foreground, a line at a time, each ending with `\n`, unless its parent gave it a pipe
+/// to read. `OUTPUT` is the console, unless its parent gave it a pipe to write.
 pub const INPUT: u64 = 0;
+pub const OUTPUT: u64 = 1;
+
+/// Bytes a pipe holds before writers wait for a reader.
+pub const PIPE_CAPACITY: usize = 4096;
 
 /// Identifies a system call, in x8.
 #[repr(u64)]
@@ -75,6 +80,7 @@ pub enum Number {
     Close = 11,
     Spawn = 12,
     Wait = 13,
+    Pipe = 14,
 }
 
 impl Number {
@@ -94,6 +100,7 @@ impl Number {
             11 => Number::Close,
             12 => Number::Spawn,
             13 => Number::Wait,
+            14 => Number::Pipe,
             _ => return None,
         })
     }
@@ -103,9 +110,11 @@ impl Number {
 pub enum Syscall {
     /// Ends the program with an exit code. Never returns.
     Exit { code: i32 },
-    /// Writes up to `MAX_WRITE` bytes from `ptr` to the console. Returns how many were
-    /// written. Invalid UTF-8 and `$` are shown as `?`.
-    Write { ptr: u64, len: u64 },
+    /// Writes up to `MAX_WRITE` bytes from `ptr` to a handle: `OUTPUT` or a pipe's write end.
+    /// Returns how many were written (a pipe takes what fits, waiting until something does).
+    /// On the console, invalid UTF-8 and `$` are shown as `?`. `BrokenPipe` once a pipe has
+    /// no readers left.
+    Write { handle: u64, ptr: u64, len: u64 },
     /// Lets other tasks run. Returns 0.
     Yield,
     /// Sleeps for at least `micros` microseconds. Returns 0.
@@ -118,7 +127,8 @@ pub enum Syscall {
     /// `NoMemory` if the heap can't grow that far.
     Map { len: u64 },
     /// Reads up to `len` bytes (at most `MAX_READ`) from a handle into `ptr`. Returns how
-    /// many were read: 0 at the end of a file. Reading `INPUT` waits until there is some.
+    /// many were read: 0 at the end of a file, or of a pipe once no writers are left. Reading
+    /// `INPUT` or a pipe waits until there is something.
     Read { handle: u64, ptr: u64, len: u64 },
     /// Fills up to `len` bytes (at most `MAX_RANDOM`) at `ptr` with random bytes from the
     /// hardware generator. Returns how many were filled.
@@ -131,16 +141,21 @@ pub enum Syscall {
     /// Writes the directory's next [`DirEntry`] to `entry`. Returns 1, or 0 once all have
     /// been read.
     ReadDir { handle: u64, entry: u64 },
-    /// Closes a handle from `Open`, `OpenDir` or `Spawn` (the child runs on, unwatched).
-    /// Exiting closes them all.
+    /// Closes a handle from `Open`, `OpenDir`, `Spawn` (the child runs on, unwatched) or
+    /// `Pipe`. Exiting closes them all.
     Close { handle: u64 },
     /// Starts the program in the file at `path..path + path_len`, with the arguments at
-    /// `args..args + args_len`. Returns a handle for `Wait`. While this program waits on it,
-    /// input sent to this program goes to the child.
-    Spawn { path: u64, path_len: u64, args: u64, args_len: u64 },
+    /// `args..args + args_len`. Its `INPUT` is `input`: this program's `INPUT`, or a pipe's
+    /// read end. Its `OUTPUT` is `output`: this program's `OUTPUT`, or a pipe's write end.
+    /// Returns a handle for `Wait`. While this program waits on it, input sent to this
+    /// program goes to the child.
+    Spawn { path: u64, path_len: u64, args: u64, args_len: u64, input: u64, output: u64 },
     /// Waits for a child from `Spawn` to end, and closes its handle. Returns its
     /// [`ExitStatus`], encoded.
     Wait { handle: u64 },
+    /// Makes a pipe, and writes its two handles to `ends`: the read end, then the write end,
+    /// as two u64s.
+    Pipe { ends: u64 },
 }
 
 /// The registers a system call is made with.
@@ -169,6 +184,7 @@ impl Syscall {
             Syscall::Close { .. } => Number::Close,
             Syscall::Spawn { .. } => Number::Spawn,
             Syscall::Wait { .. } => Number::Wait,
+            Syscall::Pipe { .. } => Number::Pipe,
         }
     }
 
@@ -176,12 +192,15 @@ impl Syscall {
         let args = match *self {
             // Sign-extended, like any i32 in a 64-bit register.
             Syscall::Exit { code } => [code as i64 as u64, 0, 0, 0, 0, 0],
-            Syscall::Write { ptr, len } | Syscall::Random { ptr, len } => [ptr, len, 0, 0, 0, 0],
-            Syscall::Read { handle, ptr, len } => [handle, ptr, len, 0, 0, 0],
+            Syscall::Random { ptr, len } => [ptr, len, 0, 0, 0, 0],
+            Syscall::Read { handle, ptr, len } | Syscall::Write { handle, ptr, len } => [handle, ptr, len, 0, 0, 0],
+            Syscall::Pipe { ends } => [ends, 0, 0, 0, 0, 0],
             Syscall::Open { path, len } | Syscall::OpenDir { path, len } => [path, len, 0, 0, 0, 0],
             Syscall::ReadDir { handle, entry } => [handle, entry, 0, 0, 0, 0],
             Syscall::Close { handle } | Syscall::Wait { handle } => [handle, 0, 0, 0, 0, 0],
-            Syscall::Spawn { path, path_len, args, args_len } => [path, path_len, args, args_len, 0, 0],
+            Syscall::Spawn { path, path_len, args, args_len, input, output } => {
+                [path, path_len, args, args_len, input, output]
+            }
             Syscall::Sleep { micros } => [micros, 0, 0, 0, 0, 0],
             Syscall::Map { len } => [len, 0, 0, 0, 0, 0],
             Syscall::Yield | Syscall::Uptime => [0; 6],
@@ -192,14 +211,14 @@ impl Syscall {
     /// Unknown numbers are `NoSys`; arguments out of range for their type are `Invalid`.
     /// Arguments a call doesn't take are ignored.
     pub fn decode(registers: Registers) -> Result<Syscall, Errno> {
-        let [a0, a1, a2, a3, ..] = registers.args;
+        let [a0, a1, a2, a3, a4, a5] = registers.args;
         let number = Number::from_raw(registers.number).ok_or(Errno::NoSys)?;
         Ok(match number {
             Number::Exit => {
                 let code = i32::try_from(a0 as i64).map_err(|_| Errno::Invalid)?;
                 Syscall::Exit { code }
             }
-            Number::Write => Syscall::Write { ptr: a0, len: a1 },
+            Number::Write => Syscall::Write { handle: a0, ptr: a1, len: a2 },
             Number::Yield => Syscall::Yield,
             Number::Sleep => Syscall::Sleep { micros: a0 },
             Number::Uptime => Syscall::Uptime,
@@ -210,8 +229,9 @@ impl Syscall {
             Number::OpenDir => Syscall::OpenDir { path: a0, len: a1 },
             Number::ReadDir => Syscall::ReadDir { handle: a0, entry: a1 },
             Number::Close => Syscall::Close { handle: a0 },
-            Number::Spawn => Syscall::Spawn { path: a0, path_len: a1, args: a2, args_len: a3 },
+            Number::Spawn => Syscall::Spawn { path: a0, path_len: a1, args: a2, args_len: a3, input: a4, output: a5 },
             Number::Wait => Syscall::Wait { handle: a0 },
+            Number::Pipe => Syscall::Pipe { ends: a0 },
         })
     }
 }
@@ -241,6 +261,8 @@ pub enum Errno {
     Io,
     /// Not a program RustyPI can run.
     NotExecutable,
+    /// Writing to a pipe that nobody reads any more.
+    BrokenPipe,
     /// A code this version of the ABI doesn't know, from a newer kernel.
     Unknown,
 }
@@ -260,6 +282,7 @@ impl Errno {
             Errno::TooMany => 9,
             Errno::Io => 10,
             Errno::NotExecutable => 11,
+            Errno::BrokenPipe => 12,
             Errno::Unknown => 4095,
         }
     }
@@ -277,6 +300,7 @@ impl Errno {
             9 => Errno::TooMany,
             10 => Errno::Io,
             11 => Errno::NotExecutable,
+            12 => Errno::BrokenPipe,
             _ => Errno::Unknown,
         }
     }
@@ -394,10 +418,10 @@ pub const fn decode_result(x0: u64) -> Result<u64, Errno> {
 mod tests {
     use super::*;
 
-    const ALL: [Syscall; 15] = [
+    const ALL: [Syscall; 16] = [
         Syscall::Exit { code: 0 },
         Syscall::Exit { code: -7 },
-        Syscall::Write { ptr: 0x8000_0000, len: 12 },
+        Syscall::Write { handle: OUTPUT, ptr: 0x8000_0000, len: 12 },
         Syscall::Yield,
         Syscall::Sleep { micros: 1_500 },
         Syscall::Uptime,
@@ -408,8 +432,9 @@ mod tests {
         Syscall::OpenDir { path: 0x8000_3000, len: 4 },
         Syscall::ReadDir { handle: 2, entry: 0x8000_4000 },
         Syscall::Close { handle: 2 },
-        Syscall::Spawn { path: 0x8000_3000, path_len: 9, args: 0x8000_3100, args_len: 3 },
+        Syscall::Spawn { path: 0x8000_3000, path_len: 9, args: 0x8000_3100, args_len: 3, input: 5, output: OUTPUT },
         Syscall::Wait { handle: 4 },
+        Syscall::Pipe { ends: 0x8000_5000 },
     ];
 
     #[test]
@@ -462,6 +487,7 @@ mod tests {
             Errno::TooMany,
             Errno::Io,
             Errno::NotExecutable,
+            Errno::BrokenPipe,
         ]
         .map(Err);
         for result in [Ok(0), Ok(42), Ok(MAX_RESULT)].into_iter().chain(errors) {

@@ -13,6 +13,7 @@
 //! saved `ExceptionContext` until it returns.
 
 mod handles;
+mod pipe;
 mod programs;
 
 pub use programs::{Program, PROGRAMS};
@@ -23,7 +24,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use core::fmt;
 use core::time::Duration;
-use rustypi_abi::{encode_result, Errno, Registers, Syscall, INPUT, MAX_RANDOM, MAX_READ, MAX_WRITE, SVC_SYSCALL};
+use rustypi_abi::{encode_result, Errno, Registers, Syscall, INPUT, MAX_RANDOM, MAX_READ, MAX_WRITE, OUTPUT, SVC_SYSCALL};
 use rustypi_abi::layout::{MAX_ARGS, PROGRAM_END, STACK_SIZE, STACK_TOP, USER_BASE};
 use rustypi_core::elf;
 use rustypi_core::paging::{Access, AddressSpace, MapError, PAGE_SIZE};
@@ -158,6 +159,39 @@ struct Running {
     waiting_for: Option<TaskId>,
     /// Its FP/SIMD registers, while another program has them (see `arch::fp`).
     fp: Box<FpState>,
+    /// Where its `INPUT` comes from and its `OUTPUT` goes.
+    io: Io,
+    /// The program that started it, which reports how it ends; `None` for the shell's.
+    parent: Option<TaskId>,
+}
+
+/// Where a program's `INPUT` comes from, or its `OUTPUT` goes.
+enum Stream {
+    /// Typed lines in, the console out.
+    Console,
+    Pipe(pipe::PipeEnd),
+}
+
+impl Stream {
+    fn duplicate(&self) -> Stream {
+        match self {
+            Stream::Console => Stream::Console,
+            Stream::Pipe(end) => Stream::Pipe(end.duplicate()),
+        }
+    }
+}
+
+/// A program's `INPUT` and `OUTPUT`.
+pub struct Io {
+    input: Stream,
+    output: Stream,
+}
+
+impl Io {
+    /// Typed lines in, the console out: what the shell's programs get.
+    pub fn console() -> Self {
+        Io { input: Stream::Console, output: Stream::Console }
+    }
 }
 
 /// Most bytes of unread input a program can have waiting.
@@ -189,8 +223,13 @@ impl Process {
     }
 }
 
-/// Starts a program called `name` in an address space of its own, with `args`.
+/// Starts a program called `name` in an address space of its own, with `args`, on the console.
 pub fn spawn(name: &str, code: Code, args: &str) -> Result<Process, SpawnError> {
+    spawn_with(name, code, args, Io::console(), None)
+}
+
+/// Starts a program with `io`, as a child of `parent` if it has one.
+fn spawn_with(name: &str, code: Code, args: &str, io: Io, parent: Option<TaskId>) -> Result<Process, SpawnError> {
     if args.len() > MAX_ARGS {
         return Err(SpawnError::ArgsTooLong);
     }
@@ -248,6 +287,8 @@ pub fn spawn(name: &str, code: Code, args: &str) -> Result<Process, SpawnError> 
         handles: handles::Handles::new(),
         waiting_for: None,
         fp: Box::new(FpState::new()),
+        io,
+        parent,
     };
     // Registered under the lock, so the program can't make a system call before it is known.
     let id = PROCESSES.lock(|processes| {
@@ -396,7 +437,8 @@ pub fn on_user_sync(ctx: *mut ExceptionContext) -> *mut ExceptionContext {
 fn syscall(call: Syscall) -> Result<u64, Errno> {
     match call {
         Syscall::Exit { code } => exit(Exit::Code(code)),
-        Syscall::Write { ptr, len } => write(ptr, len),
+        Syscall::Write { handle: OUTPUT, ptr, len } => write_output(ptr, len),
+        Syscall::Write { handle, ptr, len } => handles::write(handle, ptr, len),
         Syscall::Yield => {
             sched::yield_now();
             Ok(0)
@@ -408,12 +450,15 @@ fn syscall(call: Syscall) -> Result<u64, Errno> {
         Syscall::Uptime => Ok(timer::now_us()),
         Syscall::Map { len } => map(len),
         Syscall::Read { handle: INPUT, ptr, len } => read_input(ptr, len),
+        Syscall::Pipe { ends } => handles::pipe(ends),
         Syscall::Read { handle, ptr, len } => handles::read(handle, ptr, len),
         Syscall::Open { path, len } => handles::open(path, len),
         Syscall::OpenDir { path, len } => handles::open_dir(path, len),
         Syscall::ReadDir { handle, entry } => handles::read_dir(handle, entry),
         Syscall::Close { handle } => handles::close(handle),
-        Syscall::Spawn { path, path_len, args, args_len } => handles::spawn(path, path_len, args, args_len),
+        Syscall::Spawn { path, path_len, args, args_len, input, output } => {
+            handles::spawn(path, path_len, args, args_len, input, output)
+        }
         Syscall::Wait { handle } => handles::wait(handle),
         Syscall::Random { ptr, len } => random(ptr, len),
     }
@@ -432,9 +477,22 @@ fn random(ptr: u64, len: u64) -> Result<u64, Errno> {
     Ok(buf.len() as u64)
 }
 
-/// Copies the running program's waiting input into its memory at `ptr`, waiting for some if
-/// there is none. A killed program stops waiting (and exits once the call returns).
+/// Reads the running program's `INPUT`: typed lines, or its pipe.
 fn read_input(ptr: u64, len: u64) -> Result<u64, Errno> {
+    let id = sched::current();
+    let pipe = PROCESSES.lock(|processes| match &processes.get(&id).expect("a user task has a process").io.input {
+        Stream::Console => None,
+        Stream::Pipe(end) => Some(end.pipe()),
+    });
+    match pipe {
+        Some(pipe) => read_pipe(&pipe, ptr, len),
+        None => read_typed(ptr, len),
+    }
+}
+
+/// Copies the running program's waiting typed input into its memory at `ptr`, waiting for
+/// some if there is none. A killed program stops waiting (and exits once the call returns).
+fn read_typed(ptr: u64, len: u64) -> Result<u64, Errno> {
     let id = sched::current();
     let len = len.min(MAX_READ as u64) as usize;
     if len == 0 {
@@ -483,12 +541,49 @@ fn map(len: u64) -> Result<u64, Errno> {
     Ok(start)
 }
 
-fn write(ptr: u64, len: u64) -> Result<u64, Errno> {
+/// Writes to the running program's `OUTPUT`: the console, or its pipe.
+fn write_output(ptr: u64, len: u64) -> Result<u64, Errno> {
+    let id = sched::current();
+    let pipe = PROCESSES.lock(|processes| match &processes.get(&id).expect("a user task has a process").io.output {
+        Stream::Console => None,
+        Stream::Pipe(end) => Some(end.pipe()),
+    });
+    if let Some(pipe) = pipe {
+        return write_pipe(&pipe, ptr, len);
+    }
     let mut buf = [0; MAX_WRITE];
     let len = len.min(MAX_WRITE as u64) as usize;
     let bytes = copy_from_user(ptr, &mut buf[..len])?;
     print!("{}", PlainText(bytes));
     Ok(len as u64)
+}
+
+/// Reads from a pipe into the running program's memory. A killed program stops waiting.
+fn read_pipe(pipe: &pipe::Pipe, ptr: u64, len: u64) -> Result<u64, Errno> {
+    let id = sched::current();
+    let mut buf = [0; MAX_READ];
+    let buf = &mut buf[..len.min(MAX_READ as u64) as usize];
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    let count = pipe.read(buf, || was_killed(id));
+    // Taken from the pipe already: a bad pointer loses these bytes.
+    PROCESSES.lock(|processes| {
+        let running = processes.get_mut(&id).expect("a user task has a process");
+        running.memory.write_user(ptr, &buf[..count]).map_err(|_| Errno::Fault)
+    })?;
+    Ok(count as u64)
+}
+
+/// Writes the running program's memory into a pipe. A killed program stops waiting.
+fn write_pipe(pipe: &pipe::Pipe, ptr: u64, len: u64) -> Result<u64, Errno> {
+    let id = sched::current();
+    let mut buf = [0; MAX_WRITE];
+    let bytes = copy_from_user(ptr, &mut buf[..len.min(MAX_WRITE as u64) as usize])?;
+    if bytes.is_empty() {
+        return Ok(0);
+    }
+    pipe.write(bytes, || was_killed(id)).map(|count| count as u64)
 }
 
 /// Copies the running program's memory at `addr` into `buf`, if the program could read all of
@@ -530,7 +625,10 @@ fn exit(status: Exit) -> ! {
         fp::set_owner(None);
     }
     running.exit.lock(|exit| *exit = Some(status));
-    println!("[{}] {} {}", id.0, running.name, status);
+    // A parent reports its children's exits itself; crashes are always worth the details.
+    if running.parent.is_none() || matches!(status, Exit::Crashed(_)) {
+        println!("[{}] {} {}", id.0, running.name, status);
+    }
     // sched::exit never returns, so nothing would drop it.
     drop(running);
     sched::exit()

@@ -34,6 +34,8 @@ pub const UART_RX: Event = Event(1);
 pub const PROGRAM_INPUT: Event = Event(2);
 /// The link task queued a frame for the shell.
 pub const SHELL_INBOX: Event = Event(3);
+/// A pipe changed: bytes went in or out, or an end closed.
+pub const PIPE: Event = Event(4);
 
 const STACK_SIZE: usize = 32 * 1024;
 /// Unused stack holds this byte, so the high-water mark can be measured.

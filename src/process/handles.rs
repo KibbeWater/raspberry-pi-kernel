@@ -1,6 +1,6 @@
 // handles.rs
-//! What a program has open, by handle: files, directories and the children it started. And
-//! the system calls on them.
+//! What a program has open, by handle: files, directories, the children it started and pipe
+//! ends. And the system calls on them.
 //!
 //! The filesystem is read-only, and files are small, so opening a file reads it whole (up to
 //! `MAX_FILE`); reads then come from memory. Opening a directory lists it.
@@ -10,21 +10,26 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 use rustypi_abi::layout::MAX_ARGS;
-use rustypi_abi::{DirEntry, Errno, ExitStatus, INPUT, MAX_FILE, MAX_HANDLES, MAX_PATH, MAX_READ};
+use rustypi_abi::{DirEntry, Errno, ExitStatus, INPUT, MAX_FILE, MAX_HANDLES, MAX_PATH, MAX_READ, OUTPUT};
 use rustypi_core::elf;
 use rustypi_core::fat::{self, EntryKind, FatError};
 use crate::sched;
 use crate::synchronization::interface::Mutex;
 use crate::sys::fs::{self, FsError};
-use super::{copy_from_user, was_killed, Code, Exit, Process, SpawnError, PROCESSES};
+use super::pipe::{End, PipeEnd};
+use super::{copy_from_user, read_pipe, was_killed, write_pipe, Code, Exit, Io, Process, Running, SpawnError, Stream, PROCESSES};
 
 enum Open {
     File { data: Vec<u8>, position: usize },
     Dir { entries: Vec<fat::DirEntry>, position: usize },
     Child(Process),
+    Pipe(PipeEnd),
 }
 
-/// A program's open handles. Handle `n` is slot `n - 1`: 0 is `INPUT`, which isn't here.
+/// The first handle `Handles` gives out; below it are `INPUT` and `OUTPUT`.
+const FIRST: u64 = OUTPUT + 1;
+
+/// A program's open handles. Handle `FIRST + n` is slot `n`.
 pub(super) struct Handles(Vec<Option<Open>>);
 
 impl Handles {
@@ -42,15 +47,19 @@ impl Handles {
             None => return Err(Errno::TooMany),
         };
         self.0[slot] = Some(open);
-        Ok(slot as u64 + 1)
+        Ok(slot as u64 + FIRST)
+    }
+
+    fn free_slots(&self) -> usize {
+        MAX_HANDLES - self.0.iter().filter(|slot| slot.is_some()).count()
     }
 
     fn has_room(&self) -> bool {
-        self.0.len() < MAX_HANDLES || self.0.iter().any(Option::is_none)
+        self.free_slots() > 0
     }
 
     fn slot(&mut self, handle: u64) -> Result<&mut Option<Open>, Errno> {
-        let slot = handle.checked_sub(1).ok_or(Errno::BadHandle)? as usize;
+        let slot = handle.checked_sub(FIRST).ok_or(Errno::BadHandle)? as usize;
         self.0.get_mut(slot).filter(|slot| slot.is_some()).ok_or(Errno::BadHandle)
     }
 
@@ -73,7 +82,7 @@ fn errno(error: FsError) -> Errno {
 }
 
 /// Runs `f` with the running program's handles and memory.
-fn with_running<R>(f: impl FnOnce(&mut super::Running) -> R) -> R {
+fn with_running<R>(f: impl FnOnce(&mut Running) -> R) -> R {
     let id = sched::current();
     PROCESSES.lock(|processes| f(processes.get_mut(&id).expect("a user task has a process")))
 }
@@ -111,9 +120,18 @@ pub(super) fn open_dir(path: u64, len: u64) -> Result<u64, Errno> {
     with_running(|running| running.handles.insert(Open::Dir { entries, position: 0 }))
 }
 
-/// Reads an open file. `INPUT` is handled by the caller.
+/// Reads an open file or a pipe's read end. `INPUT` is handled by the caller.
 pub(super) fn read(handle: u64, ptr: u64, len: u64) -> Result<u64, Errno> {
     debug_assert_ne!(handle, INPUT);
+    // A pipe is waited on outside the lock.
+    let pipe = with_running(|running| match running.handles.get_mut(handle)? {
+        Open::Pipe(end) if end.end() == End::Read => Ok(Some(end.pipe())),
+        Open::Pipe(_) => Err(Errno::BadHandle),
+        _ => Ok(None),
+    })?;
+    if let Some(pipe) = pipe {
+        return read_pipe(&pipe, ptr, len);
+    }
     with_running(|running| match running.handles.get_mut(handle)? {
         Open::File { data, position } => {
             let count = (len as usize).min(MAX_READ).min(data.len() - *position);
@@ -122,8 +140,52 @@ pub(super) fn read(handle: u64, ptr: u64, len: u64) -> Result<u64, Errno> {
             Ok(count as u64)
         }
         Open::Dir { .. } => Err(Errno::IsADirectory),
-        Open::Child(_) => Err(Errno::BadHandle),
+        Open::Child(_) | Open::Pipe(_) => Err(Errno::BadHandle),
     })
+}
+
+/// Writes to a pipe's write end. `OUTPUT` is handled by the caller.
+pub(super) fn write(handle: u64, ptr: u64, len: u64) -> Result<u64, Errno> {
+    let pipe = with_running(|running| match running.handles.get_mut(handle)? {
+        Open::Pipe(end) if end.end() == End::Write => Ok(end.pipe()),
+        _ => Err(Errno::BadHandle),
+    })?;
+    write_pipe(&pipe, ptr, len)
+}
+
+/// Makes a pipe and writes its read and write handles to `ends`.
+pub(super) fn pipe(ends: u64) -> Result<u64, Errno> {
+    with_running(|running| {
+        if running.handles.free_slots() < 2 {
+            return Err(Errno::TooMany);
+        }
+        let (reader, writer) = PipeEnd::pair();
+        let read = running.handles.insert(Open::Pipe(reader))?;
+        let write = running.handles.insert(Open::Pipe(writer))?;
+        let mut handles = [0; 16];
+        handles[..8].copy_from_slice(&read.to_le_bytes());
+        handles[8..].copy_from_slice(&write.to_le_bytes());
+        if running.memory.write_user(ends, &handles).is_err() {
+            // Nobody could use them.
+            let _ = running.handles.take(read);
+            let _ = running.handles.take(write);
+            return Err(Errno::Fault);
+        }
+        Ok(0)
+    })
+}
+
+/// The stream a child gets for `handle`: this program's own `INPUT` or `OUTPUT`, or a pipe end
+/// of the right kind.
+fn stream_for(running: &mut Running, handle: u64, end: End) -> Result<Stream, Errno> {
+    match (handle, end) {
+        (INPUT, End::Read) => Ok(running.io.input.duplicate()),
+        (OUTPUT, End::Write) => Ok(running.io.output.duplicate()),
+        _ => match running.handles.get_mut(handle)? {
+            Open::Pipe(pipe) if pipe.end() == end => Ok(Stream::Pipe(pipe.duplicate())),
+            _ => Err(Errno::BadHandle),
+        },
+    }
 }
 
 pub(super) fn read_dir(handle: u64, entry: u64) -> Result<u64, Errno> {
@@ -136,7 +198,7 @@ pub(super) fn read_dir(handle: u64, entry: u64) -> Result<u64, Errno> {
             Ok(1)
         }
         Open::File { .. } => Err(Errno::NotADirectory),
-        Open::Child(_) => Err(Errno::BadHandle),
+        Open::Child(_) | Open::Pipe(_) => Err(Errno::BadHandle),
     })
 }
 
@@ -145,18 +207,22 @@ pub(super) fn close(handle: u64) -> Result<u64, Errno> {
     with_running(|running| running.handles.take(handle)).map(|_| 0)
 }
 
-pub(super) fn spawn(path: u64, path_len: u64, args: u64, args_len: u64) -> Result<u64, Errno> {
+pub(super) fn spawn(path: u64, path_len: u64, args: u64, args_len: u64, input: u64, output: u64) -> Result<u64, Errno> {
     let path = user_string(path, path_len, MAX_PATH)?;
     let args = user_string(args, args_len, MAX_ARGS)?;
     // Checked first: the child shouldn't start if its handle has nowhere to go. Only this
     // program opens its handles, and it is busy in here.
-    if !with_running(|running| running.handles.has_room()) {
-        return Err(Errno::TooMany);
-    }
+    let io = with_running(|running| {
+        if !running.handles.has_room() {
+            return Err(Errno::TooMany);
+        }
+        Ok(Io { input: stream_for(running, input, End::Read)?, output: stream_for(running, output, End::Write)? })
+    })?;
     let file = read_file(&path)?;
     let program = elf::parse(&file).map_err(|_| Errno::NotExecutable)?;
     let name = path.rsplit('/').next().unwrap_or(&path);
-    let child = super::spawn(name, Code::Elf(&program), &args).map_err(|error| match error {
+    let parent = sched::current();
+    let child = super::spawn_with(name, Code::Elf(&program), &args, io, Some(parent)).map_err(|error| match error {
         SpawnError::TooManyPrograms => Errno::TooMany,
         SpawnError::ArgsTooLong => Errno::Invalid,
         SpawnError::OutOfMemory => Errno::NoMemory,
