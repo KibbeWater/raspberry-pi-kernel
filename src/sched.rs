@@ -201,29 +201,17 @@ pub fn redirect_to_kernel(id: TaskId, entry: extern "C" fn() -> !) -> bool {
 
 /// Makes every task waiting for `event` (in `wait_until`) check again.
 pub fn notify(event: Event) {
-    SCHEDULER.lock(|scheduler| {
-        if let Some(scheduler) = scheduler {
-            scheduler.queue.notify(event);
-        }
-    });
+    with_queue(|queue| queue.notify(event));
 }
 
 /// Cuts a sleep or wait of task `id` short, so it notices something has changed.
 pub fn interrupt(id: TaskId) {
-    SCHEDULER.lock(|scheduler| {
-        if let Some(scheduler) = scheduler {
-            scheduler.queue.interrupt(id);
-        }
-    });
+    with_queue(|queue| queue.interrupt(id));
 }
 
 /// Ends the running task. Its stack is freed on a later switch.
 pub fn exit() -> ! {
-    SCHEDULER.lock(|scheduler| {
-        if let Some(scheduler) = scheduler {
-            scheduler.queue.finish_current();
-        }
-    });
+    with_queue(|queue| queue.finish_current());
     yield_now();
     unreachable!("a finished task was scheduled again");
 }
@@ -237,11 +225,7 @@ pub fn yield_now() {
 /// run meanwhile.
 pub fn sleep(duration: Duration) {
     let until = timer::now_us() + duration.as_micros() as u64;
-    SCHEDULER.lock(|scheduler| {
-        if let Some(scheduler) = scheduler {
-            scheduler.queue.sleep_current(until);
-        }
-    });
+    with_queue(|queue| queue.sleep_current(until));
     yield_now();
 }
 
@@ -254,11 +238,7 @@ pub fn wait_until(event: Event, ready: impl Fn() -> bool) {
             arch::irq_restore(saved);
             return;
         }
-        SCHEDULER.lock(|scheduler| {
-            if let Some(scheduler) = scheduler {
-                scheduler.queue.wait_current(event);
-            }
-        });
+        with_queue(|queue| queue.wait_current(event));
         yield_now();
         arch::irq_restore(saved);
     }
@@ -266,33 +246,30 @@ pub fn wait_until(event: Event, ready: impl Fn() -> bool) {
 
 /// The running task. Before `init`, the boot code counts as task 0, which it becomes.
 pub fn current() -> TaskId {
-    SCHEDULER.lock(|scheduler| scheduler.as_ref().map_or(TaskId(0), |s| s.queue.current()))
+    with_queue(|queue| queue.current()).unwrap_or(TaskId(0))
+}
+
+/// Runs `f` on the run queue, once the scheduler has started.
+fn with_queue<R>(f: impl FnOnce(&mut RunQueue) -> R) -> Option<R> {
+    SCHEDULER.lock(|scheduler| scheduler.as_mut().map(|scheduler| f(&mut scheduler.queue)))
 }
 
 /// Blocks the running task until `wake` is called with its id. Call with IRQs masked, after
 /// arranging for someone to wake it, so the wake can't come before the block.
 pub fn block() {
-    SCHEDULER.lock(|scheduler| {
-        if let Some(scheduler) = scheduler {
-            scheduler.queue.block_current();
-        }
-    });
+    with_queue(|queue| queue.block_current());
     yield_now();
 }
 
 /// Makes a task blocked in `block` ready to run.
 pub fn wake(id: TaskId) {
-    SCHEDULER.lock(|scheduler| {
-        if let Some(scheduler) = scheduler {
-            scheduler.queue.wake(id);
-        }
-    });
+    with_queue(|queue| queue.wake(id));
 }
 
 /// Waits for task `id` to finish (or be gone already).
 pub fn join(id: TaskId) {
     loop {
-        let state = SCHEDULER.lock(|scheduler| scheduler.as_ref().and_then(|s| s.queue.state(id)));
+        let state = with_queue(|queue| queue.state(id)).flatten();
         if matches!(state, None | Some(State::Finished)) {
             return;
         }
