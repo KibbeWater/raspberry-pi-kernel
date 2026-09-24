@@ -12,7 +12,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use rustypi_core::line::LineEditor;
-use rustypi_core::usb::tree::{self, Bus, Device, Target};
+use rustypi_core::usb::tree::{self, Bus, Device, Target, Tree};
 use rustypi_core::usb::{Direction, EndpointType, KeyboardReport, SetupPacket};
 use crate::drivers::usb::{Controller, Host, InterruptIn, Toggle, UsbError};
 use crate::synchronization::{interface::Mutex as _, Mutex};
@@ -84,7 +84,7 @@ enum State {
     Starting,
     Failed(ScanError),
     /// The host boxed: it holds its DMA buffer, which then stays put.
-    Running { host: Box<Host>, root: Device<UsbError> },
+    Running { host: Box<Host>, tree: Tree<UsbError> },
 }
 
 /// A sleeping lock: a transfer can take a few milliseconds.
@@ -103,7 +103,7 @@ pub fn inspect<R>(f: impl FnOnce(Status) -> R) -> R {
         f(match state {
             State::Starting => Status::Starting,
             State::Failed(error) => Status::Failed(error),
-            State::Running { host, root } => Status::Running { controller: host.controller, root },
+            State::Running { host, tree } => Status::Running { controller: host.controller, root: &tree.root },
         })
     })
 }
@@ -119,13 +119,13 @@ fn run(on_line: fn(String)) {
     // Enumerated before taking the lock, which would otherwise be held for seconds.
     let scanned = Host::start().map_err(ScanError::Start).and_then(|mut host| {
         let speed = host.port.speed;
-        let root = tree::enumerate(&mut host, speed).map_err(ScanError::Root)?;
-        Ok((host, root))
+        let tree = tree::enumerate(&mut host, speed).map_err(ScanError::Root)?;
+        Ok((host, tree))
     });
     let keyboard = match scanned {
-        Ok((host, root)) => {
-            let keyboard = find_keyboard(&root);
-            USB.lock(|state| *state = State::Running { host: Box::new(host), root });
+        Ok((host, tree)) => {
+            let keyboard = find_keyboard(&tree.root);
+            USB.lock(|state| *state = State::Running { host: Box::new(host), tree });
             keyboard
         }
         Err(error) => {

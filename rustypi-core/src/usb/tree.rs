@@ -156,15 +156,75 @@ impl<E> Port<E> {
     }
 }
 
+/// Device addresses in use.
+struct Addresses {
+    used: [bool; MAX_ADDRESS as usize + 1],
+}
+
+impl Addresses {
+    const fn new() -> Self {
+        Addresses { used: [false; MAX_ADDRESS as usize + 1] }
+    }
+
+    /// The lowest free address.
+    fn take(&mut self) -> Option<u8> {
+        let address = (1..=MAX_ADDRESS).find(|&address| !self.used[address as usize])?;
+        self.used[address as usize] = true;
+        Some(address)
+    }
+
+    /// Gives back `device`'s address and those of everything behind it.
+    fn free<E>(&mut self, device: &Device<E>) {
+        for (_, device) in device.walk() {
+            self.used[device.address as usize] = false;
+        }
+    }
+}
+
+/// Everything on the bus, and the addresses it uses.
+pub struct Tree<E> {
+    /// The device on the root port.
+    pub root: Device<E>,
+    addresses: Addresses,
+}
+
+/// A device that came or went, from `Tree::poll_changes`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Change {
+    /// Enumerated, with anything behind it.
+    Added { address: u8 },
+    /// Gone, with anything that was behind it.
+    Removed { address: u8 },
+}
+
 /// Enumerates the device on the root port, just reset, at speed `speed`, and everything
 /// behind it if it is a hub.
-pub fn enumerate<B: Bus>(bus: &mut B, speed: Speed) -> Result<Device<B::Error>, Error<B::Error>> {
-    Enumerator { bus, next_address: 1 }.device(speed, None, 0)
+pub fn enumerate<B: Bus>(bus: &mut B, speed: Speed) -> Result<Tree<B::Error>, Error<B::Error>> {
+    let mut addresses = Addresses::new();
+    let root = Enumerator { bus, addresses: &mut addresses }.device(speed, None, 0)?;
+    Ok(Tree { root, addresses })
+}
+
+impl<E> Tree<E> {
+    /// Looks at every hub's ports for devices that came or went since the last look (or
+    /// enumeration): forgets those that went, and enumerates those that came. Returns what
+    /// changed.
+    pub fn poll_changes<B: Bus<Error = E>>(&mut self, bus: &mut B) -> Vec<Change> {
+        let mut changes = Vec::new();
+        let mut enumerator = Enumerator { bus, addresses: &mut self.addresses };
+        enumerator.poll_hub(&mut self.root, 0, &mut changes);
+        changes
+    }
+
+    /// The device at `address`, if there is one.
+    pub fn device(&self, address: u8) -> Option<&Device<E>> {
+        self.root.walk().into_iter().map(|(_, device)| device).find(|device| device.address == address)
+    }
 }
 
 struct Enumerator<'a, B: Bus> {
     bus: &'a mut B,
-    next_address: u8,
+    addresses: &'a mut Addresses,
 }
 
 impl<B: Bus> Enumerator<'_, B> {
@@ -180,12 +240,20 @@ impl<B: Bus> Enumerator<'_, B> {
         let read = self.control(default, SetupPacket::get_descriptor(DescriptorType::DEVICE, 0, 8), &mut bytes[..8])?;
         let max_packet = DeviceDescriptor::max_packet_size(&bytes[..read])? as u16;
 
-        if self.next_address > MAX_ADDRESS {
-            return Err(Error::OutOfAddresses);
+        let address = self.addresses.take().ok_or(Error::OutOfAddresses)?;
+        let device = self.addressed(Target { max_packet, ..default }, address, depth);
+        if device.is_err() {
+            // Its port is disabled, so nothing answers there any more.
+            self.addresses.used[address as usize] = false;
         }
-        let address = self.next_address;
-        self.next_address += 1;
-        self.control(Target { max_packet, ..default }, SetupPacket::set_address(address), &mut [])?;
+        device
+    }
+
+    /// The rest of enumerating a device, from giving it `address`.
+    fn addressed(&mut self, default: Target, address: u8, depth: usize) -> Result<Device<B::Error>, Error<B::Error>> {
+        let Target { max_packet, speed, translator, .. } = default;
+        let mut bytes = [0; DeviceDescriptor::LENGTH];
+        self.control(default, SetupPacket::set_address(address), &mut [])?;
         self.bus.delay_ms(SET_ADDRESS_RECOVERY_MS);
         let target = Target { address, max_packet, speed, translator };
 
@@ -253,6 +321,34 @@ impl<B: Bus> Enumerator<'_, B> {
         found
     }
 
+    /// Looks at `device`'s ports, if it is a hub, and on down through the hubs on them, for
+    /// devices that came or went.
+    fn poll_hub(&mut self, device: &mut Device<B::Error>, depth: usize, changes: &mut Vec<Change>) {
+        let target = device.target();
+        let Some(hub) = device.hub.as_mut() else { return };
+        for (number, port) in (1..).zip(hub.ports.iter_mut()) {
+            // A hub that doesn't answer is going away itself: its own port will say so.
+            let Ok(status) = self.port_status(target, number) else { continue };
+            if !status.connection_changed() {
+                if let Port::Device(child) = port {
+                    self.poll_hub(child, depth + 1, changes);
+                }
+                continue;
+            }
+            let _ = self.control(target, SetupPacket::clear_port_feature(number, PortFeature::CONNECTION_CHANGE), &mut []);
+            if let Port::Device(gone) = core::mem::replace(port, Port::Empty) {
+                self.addresses.free(&gone);
+                changes.push(Change::Removed { address: gone.address });
+            }
+            if status.connected() {
+                *port = self.port(target, number, depth);
+                if let Port::Device(added) = port {
+                    changes.push(Change::Added { address: added.address });
+                }
+            }
+        }
+    }
+
     /// Resets a port with a device on it and returns the device's speed.
     fn reset_port(&mut self, hub: Target, port: u8) -> Result<Speed, Error<B::Error>> {
         self.control(hub, SetupPacket::set_port_feature(port, PortFeature::RESET), &mut [])?;
@@ -307,6 +403,7 @@ mod tests {
         powered: bool,
         enabled: bool,
         reset_changed: bool,
+        connection_changed: bool,
     }
 
     /// A pretend bus: devices by index, the root first, reached by address.
@@ -380,7 +477,38 @@ mod tests {
                     Speed::Full => {}
                 }
             }
-            status | (port.reset_changed as u32) << 20
+            status | (port.connection_changed as u32) << 16 | (port.reset_changed as u32) << 20
+        }
+
+        /// Pulls whatever is on `hub`'s `port` (counting from 1) out: it and everything behind
+        /// it forget their addresses.
+        fn unplug(&mut self, hub: usize, port: usize) {
+            let fake_port = &mut self.devices[hub].hub.as_mut().unwrap().ports[port - 1];
+            let Some(device) = fake_port.device.take() else { return };
+            fake_port.enabled = false;
+            fake_port.connection_changed = true;
+            self.forget(device);
+        }
+
+        fn forget(&mut self, device: usize) {
+            self.devices[device].address = None;
+            self.devices[device].configured = None;
+            let children: Vec<_> = self.devices[device].hub.iter().flat_map(|hub| hub.ports.iter().filter_map(|p| p.device)).collect();
+            for child in children {
+                self.forget(child);
+            }
+            if let Some(hub) = self.devices[device].hub.as_mut() {
+                for port in &mut hub.ports {
+                    port.powered = false;
+                    port.enabled = false;
+                }
+            }
+        }
+
+        fn plug(&mut self, hub: usize, port: usize, device: usize) {
+            let fake_port = &mut self.devices[hub].hub.as_mut().unwrap().ports[port - 1];
+            fake_port.device = Some(device);
+            fake_port.connection_changed = true;
         }
     }
 
@@ -446,7 +574,7 @@ mod tests {
                             }
                         }
                         20 => hub_port.reset_changed = false,
-                        16 => {}
+                        16 => hub_port.connection_changed = false,
                         feature => return Err(format!("clear feature {feature}")),
                     }
                     Ok(0)
@@ -463,7 +591,7 @@ mod tests {
     #[test]
     fn the_whole_bus_is_found_through_both_hubs() {
         let mut bus = FakeBus::pi_3b_plus();
-        let root = enumerate(&mut bus, Speed::High).unwrap();
+        let root = enumerate(&mut bus, Speed::High).unwrap().root;
         let found: Vec<_> = root.walk().iter().map(|(depth, d)| (*depth, d.address, d.descriptor.product)).collect();
         // Depth first: the second hub and what's on it come before the flash drive.
         assert_eq!(found, [(0, 1, 0x2514), (1, 2, 0x2514), (2, 3, 0x7800), (2, 4, 0xC31C), (1, 5, 0x5567)]);
@@ -479,7 +607,7 @@ mod tests {
     #[test]
     fn slow_devices_are_reached_through_their_hubs_translator() {
         let mut bus = FakeBus::pi_3b_plus();
-        let root = enumerate(&mut bus, Speed::High).unwrap();
+        let root = enumerate(&mut bus, Speed::High).unwrap().root;
         let second = root.hub.as_ref().unwrap().ports[0].device().expect("second hub");
         let keyboard = second.hub.as_ref().unwrap().ports[1].device().expect("keyboard");
         assert_eq!(keyboard.speed, Speed::Low);
@@ -499,7 +627,7 @@ mod tests {
         bus.devices[5].hub.as_mut().unwrap().ports[0].device = Some(6);
         bus.devices[5].translator = Some((0, 4));
         bus.devices[6].translator = Some((0, 4));
-        let root = enumerate(&mut bus, Speed::High).unwrap();
+        let root = enumerate(&mut bus, Speed::High).unwrap().root;
         let hub = root.hub.as_ref().unwrap().ports[3].device().expect("full speed hub");
         let device = hub.hub.as_ref().unwrap().ports[0].device().expect("device behind it");
         assert_eq!(device.translator, Some(Translator { hub: 1, port: 4 }));
@@ -509,13 +637,15 @@ mod tests {
     fn a_failing_device_is_reported_and_the_rest_still_found() {
         let mut bus = FakeBus::pi_3b_plus();
         bus.devices[2].broken = true; // the LAN7800
-        let root = enumerate(&mut bus, Speed::High).unwrap();
+        let root = enumerate(&mut bus, Speed::High).unwrap().root;
         let Port::Device(second) = &root.hub.as_ref().unwrap().ports[0] else { panic!("second hub") };
         assert!(matches!(&second.hub.as_ref().unwrap().ports[0], Port::Failed(Error::Bus(message)) if message == "broken"));
         assert!(!bus.devices[1].hub.as_ref().unwrap().ports[0].enabled);
-        // The keyboard and flash drive still got addresses, the next free ones after the
-        // broken device's.
-        assert!(matches!(&root.hub.as_ref().unwrap().ports[2], Port::Device(drive) if drive.address == 5));
+        // The broken device's address went back to be used again: the keyboard got it, and
+        // the flash drive the next.
+        let keyboard = second.hub.as_ref().unwrap().ports[1].device().expect("keyboard");
+        assert_eq!(keyboard.address, 3);
+        assert!(matches!(&root.hub.as_ref().unwrap().ports[2], Port::Device(drive) if drive.address == 4));
     }
 
     #[test]
@@ -523,6 +653,63 @@ mod tests {
         let mut bus = FakeBus::pi_3b_plus();
         bus.devices[0].broken = true;
         assert!(matches!(enumerate(&mut bus, Speed::High), Err(Error::Bus(_))));
+    }
+
+    #[test]
+    fn nothing_changes_while_nothing_is_plugged_or_pulled() {
+        let mut bus = FakeBus::pi_3b_plus();
+        let mut tree = enumerate(&mut bus, Speed::High).unwrap();
+        assert_eq!(tree.poll_changes(&mut bus), []);
+        assert_eq!(tree.root.walk().len(), 5);
+    }
+
+    #[test]
+    fn a_device_pulled_out_is_forgotten_and_found_again_when_plugged_back() {
+        let mut bus = FakeBus::pi_3b_plus();
+        let mut tree = enumerate(&mut bus, Speed::High).unwrap();
+        bus.unplug(1, 2); // the keyboard
+        assert_eq!(tree.poll_changes(&mut bus), [Change::Removed { address: 4 }]);
+        assert!(tree.device(4).is_none());
+        assert_eq!(tree.poll_changes(&mut bus), []);
+
+        bus.plug(1, 2, 3);
+        // It gets its old address back: the lowest free one.
+        assert_eq!(tree.poll_changes(&mut bus), [Change::Added { address: 4 }]);
+        let keyboard = tree.device(4).expect("keyboard back");
+        assert_eq!(keyboard.descriptor.product, 0xC31C);
+        assert_eq!(keyboard.translator, Some(Translator { hub: 2, port: 2 }));
+        assert_eq!(bus.devices[3].configured, Some(1));
+    }
+
+    #[test]
+    fn pulling_a_hub_takes_everything_behind_it() {
+        let mut bus = FakeBus::pi_3b_plus();
+        let mut tree = enumerate(&mut bus, Speed::High).unwrap();
+        bus.unplug(0, 1); // the second hub, with the LAN7800 and the keyboard
+        assert_eq!(tree.poll_changes(&mut bus), [Change::Removed { address: 2 }]);
+        assert_eq!(tree.root.walk().len(), 2); // the first hub and the flash drive
+        // Back again: the hub and all behind it are enumerated, reusing the freed addresses.
+        bus.plug(0, 1, 1);
+        assert_eq!(tree.poll_changes(&mut bus), [Change::Added { address: 2 }]);
+        let found: Vec<_> = tree.root.walk().iter().map(|(_, d)| (d.address, d.descriptor.product)).collect();
+        assert_eq!(found, [(1, 0x2514), (2, 0x2514), (3, 0x7800), (4, 0xC31C), (5, 0x5567)]);
+    }
+
+    #[test]
+    fn a_device_swapped_between_looks_is_both_removed_and_added() {
+        let mut bus = FakeBus::pi_3b_plus();
+        let mut tree = enumerate(&mut bus, Speed::High).unwrap();
+        // The flash drive out, and the keyboard moved into its port from the second hub.
+        bus.unplug(0, 3);
+        bus.unplug(1, 2);
+        bus.plug(0, 3, 3);
+        bus.devices[3].translator = Some((0, 3));
+        let changes = tree.poll_changes(&mut bus);
+        assert!(changes.contains(&Change::Removed { address: 5 }));
+        assert!(changes.contains(&Change::Removed { address: 4 }));
+        let moved = tree.root.hub.as_ref().unwrap().ports[2].device().expect("keyboard, moved");
+        // Straight on the first hub now: its translator is that hub's.
+        assert_eq!(moved.translator, Some(Translator { hub: 1, port: 3 }));
     }
 
     #[test]
