@@ -1,5 +1,13 @@
 #!/bin/bash
-cargo rustc --target aarch64-unknown-none-softfloat --release
+set -e
 
-echo "\nStripping EFI binary"
-rust-objcopy --strip-all -O binary target/armv7a-none-eabi/release/RustyPI target/kernel.img
+TARGET=aarch64-unknown-none-softfloat
+cargo build --release
+
+echo "Stripping to raw binary"
+rust-objcopy --strip-all -O binary target/$TARGET/release/RustyPI target/kernel8.img
+
+if [ -d /Volumes/bootfs ]; then
+    echo "Copying kernel8.img to /Volumes/bootfs"
+    cp target/kernel8.img /Volumes/bootfs/kernel8.img
+fi

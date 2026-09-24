@@ -1,6 +1,5 @@
 [build]
-target = "armv7a-none-eabi"  # Correct target for Raspberry Pi Linux
+target = "aarch64-unknown-none-softfloat"  # 64-bit bare metal, no FP/SIMD (not enabled at boot)
 
-[target.armv7a-none-eabi]
-linker = "arm-none-eabi-ld"
-rustflags = ["-C", "panic=abort", "-C", "link-arg=--script=./linker.ld"]
+[target.aarch64-unknown-none-softfloat]
+rustflags = ["-C", "target-cpu=cortex-a53", "-C", "link-arg=--script=./linker.ld"]

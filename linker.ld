@@ -5,55 +5,58 @@ HEAP_SIZE = 0x100000;
 
 SECTIONS
 {
+    /* The firmware loads kernel8.img here when arm_64bit=1. */
+    . = 0x80000;
 
-    .text.boot :
-    {
-        . = 0x8000;
-        *(.text.boot*)
-    }
-    . = ALIGN(4096);
     .text :
     {
+        KEEP(*(.text.boot))
         *(.text._start)
-        *(.text*)
+        *(.text .text.*)
     }
-
-    . = ALIGN(4096);
-    LD_STACK_PTR = .;
-    . = . + STACK_SIZE;
 
     . = ALIGN(4096);
     .rodata :
     {
-        *(.rodata)
+        *(.rodata .rodata.*)
     }
+
     . = ALIGN(4096);
     .data :
     {
-        *(.data)
+        *(.data .data.*)
     }
+
     . = ALIGN(4096);
     __bss_start = .;
-    .bss :
+    .bss (NOLOAD) :
     {
-        bss = .;
-        *(.bss)
+        *(.bss .bss.*)
+        *(COMMON)
     }
     . = ALIGN(4096);
     __bss_end = .;
     __bss_size = __bss_end - __bss_start;
 
-    . = ALIGN(4096);
+    /* Stack grows down, so LD_STACK_PTR marks the top of the region. */
+    .stack (NOLOAD) :
+    {
+        . = . + STACK_SIZE;
+    }
+    . = ALIGN(16);
+    LD_STACK_PTR = .;
 
+    . = ALIGN(4096);
     .heap (NOLOAD) :
     {
         __heap_start = .;
         . = . + HEAP_SIZE;
         __heap_end = .;
-        __heap_size = __heap_end - __heap_start;
     }
+    __heap_size = __heap_end - __heap_start;
 
     . = ALIGN(4096);
-
     __end = .;
+
+    /DISCARD/ : { *(.comment) *(.ARM.exidx*) }
 }
