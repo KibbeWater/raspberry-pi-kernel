@@ -16,7 +16,7 @@ fn main() {
     println!("cargo:rustc-env=GIT_VERSION={}{}", commit, if dirty { "-dirty" } else { "" });
 
     // Rebuild when the commit or the working tree changes.
-    for path in [".git/HEAD", ".git/index", ".git/refs", "src", "build.rs", "linker.ld", "Cargo.toml"] {
+    for path in [".git/HEAD", ".git/index", ".git/refs", "src", "rustypi-core", "build.rs", "linker.ld", "Cargo.toml"] {
         println!("cargo:rerun-if-changed={}", path);
     }
 }

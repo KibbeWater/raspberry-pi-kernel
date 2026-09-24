@@ -7,7 +7,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use crate::board::STATUS_LED;
 use crate::drivers::gpio::{set_pin_mode, write_pin, Pin, PinMode};
-use crate::session::{LineKind, Reply};
+use rustypi_core::session::{LineKind, Reply};
 use crate::sys;
 
 /// Usage and description of every command, listed by `help`. Keep in sync with
@@ -19,6 +19,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("version", "git commit the kernel was built from"),
     ("info", "board, firmware, memory, temperature, EL and MMU"),
     ("heap [test]", "heap usage, or run an allocator stress test"),
+    ("screen [test|redraw]", "screen info, colour bars, or redraw the text"),
     ("reboot", "reset the board"),
     ("shutdown", "halt; pull GPIO3 low to boot again"),
     ("panic [msg]", "panic, blink the LED and reboot"),
@@ -80,6 +81,12 @@ impl Shell {
             "info" => info(reply),
             "heap" => heap(reply),
             "heap test" => heap_test(reply),
+            "screen" => screen(reply),
+            "screen test" => {
+                let drawn = sys::console::test_pattern();
+                reply.rsp(if drawn { "bars from left: red, green, blue, white" } else { "no screen" });
+            }
+            "screen redraw" => reply.rsp(if sys::console::redraw() { "redrawn" } else { "no screen" }),
             "reboot" => {
                 reply.rsp("rebooting");
                 return Some(Action::Reboot);
@@ -110,6 +117,27 @@ impl Shell {
         write_pin(self.led, on);
         reply.rsp(if on { "led is on" } else { "led is off" });
     }
+}
+
+fn screen(reply: &mut Reply) {
+    let Some(info) = sys::console::info() else {
+        reply.rsp("no screen");
+        return;
+    };
+    reply.line(LineKind::Rsp, format_args!(
+        "{}x{}, pitch {}, {}, {}x{} text",
+        info.width,
+        info.height,
+        info.pitch,
+        if info.rgb { "rgb" } else { "bgr" },
+        info.cols,
+        info.rows,
+    ));
+    reply.line(LineKind::Rsp, format_args!(
+        "framebuffer {:#x}..{:#x}",
+        info.address,
+        info.address + info.bytes,
+    ));
 }
 
 fn heap(reply: &mut Reply) {

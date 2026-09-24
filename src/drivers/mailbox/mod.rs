@@ -1,16 +1,18 @@
 // mailbox/mod.rs
-//! VideoCore mailbox, used to query and configure the GPU firmware.
+//! VideoCore mailbox hardware, used to query and configure the GPU firmware.
 //!
-//! Only the typed property interface is public (`query`, `Batch`). The raw message buffer
-//! and hardware access stay private to this module, so every message sent is one that
-//! `Batch` built.
+//! The message encoding lives in `rustypi_core::mailbox`; this is the `Transport` that
+//! delivers its messages:
+//!
+//! ```ignore
+//! let replies = batch.send(&Mailbox)?;
+//! ```
 
-mod property;
-pub mod tags;
-
-// The driver's whole public API, whether or not the kernel uses every part yet.
+// The typed interface, re-exported so drivers only need this module.
 #[allow(unused_imports)]
-pub use property::{query, Batch, BusAddress, Handle, MailboxError, Replies, Tag, Words};
+pub use rustypi_core::mailbox::{query, tags, Batch, BusAddress, Handle, MailboxError, Replies, Tag, Words};
+
+use rustypi_core::mailbox::{Message, Transport};
 
 use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
@@ -30,19 +32,8 @@ const STATUS_EMPTY: u32 = 1 << 30;
 
 const CACHE_LINE: usize = 64;
 
-/// Size of a message buffer in 32-bit words.
-const MESSAGE_WORDS: usize = 256;
-
-#[derive(Clone, Copy)]
-enum Channel {
-    /// Property tags, ARM -> VideoCore.
-    Property = 8,
-}
-
-/// A message buffer. The firmware needs 16-byte alignment, since the low four bits of the
-/// address carry the channel.
-#[repr(C, align(16))]
-struct Message([u32; MESSAGE_WORDS]);
+/// Property tags channel, ARM -> VideoCore.
+const CHANNEL_PROPERTY: u32 = 8;
 
 /// Set while a call is in flight. The kernel runs on one core, so a call can only overlap
 /// another if an interrupt handler makes one; that is a bug, and it is caught here rather
@@ -82,7 +73,7 @@ fn write(addr: usize, value: u32) {
 /// firmware may have changed the buffer.
 #[inline(always)]
 fn sync_message(msg: &mut Message) {
-    let ptr = msg.0.as_mut_ptr();
+    let ptr = msg.as_mut_ptr();
     let start = ptr as usize;
     for line in (start..start + size_of::<Message>()).step_by(CACHE_LINE) {
         unsafe { asm!("dc civac, {}", in(reg) line, options(nostack, preserves_flags)) };
@@ -90,22 +81,26 @@ fn sync_message(msg: &mut Message) {
     unsafe { asm!("dsb sy", in("x0") ptr, options(nostack, preserves_flags)) };
 }
 
-/// Sends `msg` on `channel` and waits for the firmware to answer in place.
-fn call(channel: Channel, msg: &mut Message) {
-    let _guard = InUseGuard::acquire();
-    // Kernel memory lives in the low 1GB, so the address fits in 32 bits, and `Message`
-    // is 16-byte aligned, leaving the low four bits for the channel.
-    let value = msg.0.as_ptr() as usize as u32 | channel as u32;
+/// The hardware mailbox's property channel.
+pub struct Mailbox;
 
-    sync_message(msg);
-    while read(MBOX1_STATUS) & STATUS_FULL != 0 {}
-    write(MBOX1_WRITE, value);
+impl Transport for Mailbox {
+    fn call(&self, msg: &mut Message) {
+        let _guard = InUseGuard::acquire();
+        // Kernel memory lives in the low 1GB, so the address fits in 32 bits, and `Message`
+        // is 16-byte aligned, leaving the low four bits for the channel.
+        let value = msg.as_mut_ptr() as usize as u32 | CHANNEL_PROPERTY;
 
-    loop {
-        while read(MBOX0_STATUS) & STATUS_EMPTY != 0 {}
-        if read(MBOX0_READ) == value {
-            break;
+        sync_message(msg);
+        while read(MBOX1_STATUS) & STATUS_FULL != 0 {}
+        write(MBOX1_WRITE, value);
+
+        loop {
+            while read(MBOX0_STATUS) & STATUS_EMPTY != 0 {}
+            if read(MBOX0_READ) == value {
+                break;
+            }
         }
+        sync_message(msg);
     }
-    sync_message(msg);
 }

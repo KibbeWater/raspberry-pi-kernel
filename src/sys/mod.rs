@@ -3,6 +3,7 @@
 //!
 //! Code outside `drivers` should go through here rather than poking hardware.
 
+pub mod console;
 pub mod print;
 mod heap;
 mod panic;
@@ -10,7 +11,7 @@ mod panic;
 use core::time::Duration;
 use crate::arch;
 use crate::drivers::interrupt::{self, Irq};
-use crate::drivers::mailbox::{self, tags, Batch};
+use crate::drivers::mailbox::{self, tags, Batch, Mailbox};
 use crate::drivers::{power, timer};
 use crate::drivers::uart::Uart;
 
@@ -20,7 +21,7 @@ pub const VERSION: &str = env!("GIT_VERSION");
 /// Period of the timer tick. It wakes `idle` so the main loop runs at least this often.
 const TICK: Duration = Duration::from_millis(100);
 
-pub use heap::Stats as HeapStats;
+pub use rustypi_core::heap::Stats as HeapStats;
 pub use mailbox::MailboxError;
 
 /// Turns on the MMU and caches and sets up the heap. Must be the first thing
@@ -103,7 +104,7 @@ pub fn board_info() -> Result<BoardInfo, MailboxError> {
     let firmware = batch.add::<tags::GetFirmwareRevision>(());
     let memory = batch.add::<tags::GetArmMemory>(());
     let temperature = batch.add::<tags::GetTemperature>(tags::SensorId::SOC);
-    let replies = batch.send()?;
+    let replies = batch.send(&Mailbox)?;
     Ok(BoardInfo {
         revision: replies.get(revision)?,
         firmware: replies.get(firmware)?,

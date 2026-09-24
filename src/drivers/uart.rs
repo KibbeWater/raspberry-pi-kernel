@@ -78,6 +78,16 @@ fn read_reg(reg: &u32) -> u32 {
 /// A zero‑sized type providing a safe UART API.
 pub struct Uart;
 
+/// `fmt::Write` adapter for the UART.
+pub struct UartWriter;
+
+impl core::fmt::Write for UartWriter {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        Uart::send_string(s);
+        Ok(())
+    }
+}
+
 impl Uart {
     /// Initializes the UART peripheral.
     ///

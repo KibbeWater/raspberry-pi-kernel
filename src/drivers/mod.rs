@@ -1,3 +1,4 @@
+pub mod framebuffer;
 pub mod gpio;
 pub mod interrupt;
 pub mod mailbox;

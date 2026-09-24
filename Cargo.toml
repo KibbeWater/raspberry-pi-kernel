@@ -17,3 +17,7 @@ doctest = false
 bench = false
 
 [dependencies]
+rustypi-core = { path = "rustypi-core" }
+
+[workspace]
+members = ["rustypi-core"]

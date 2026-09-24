@@ -22,15 +22,20 @@ const DESC_BLOCK: u64 = 0b01;
 const DESC_TABLE: u64 = 0b11;
 const ATTR_NORMAL: u64 = 0 << 2; // MAIR index 0
 const ATTR_DEVICE: u64 = 1 << 2; // MAIR index 1
+const ATTR_NORMAL_UNCACHED: u64 = 2 << 2; // MAIR index 2
 const INNER_SHAREABLE: u64 = 3 << 8;
 const ACCESS_FLAG: u64 = 1 << 10;
 const EXECUTE_NEVER: u64 = 3 << 53; // PXN | UXN
 
 const NORMAL: u64 = DESC_BLOCK | ATTR_NORMAL | INNER_SHAREABLE | ACCESS_FLAG;
 const DEVICE: u64 = DESC_BLOCK | ATTR_DEVICE | ACCESS_FLAG | EXECUTE_NEVER;
+const NORMAL_UNCACHED: u64 = DESC_BLOCK | ATTR_NORMAL_UNCACHED | INNER_SHAREABLE | ACCESS_FLAG | EXECUTE_NEVER;
 
 /// Index 0: Normal, write-back read/write-allocate. Index 1: Device-nGnRE.
-const MAIR: u64 = 0xFF | 0x04 << 8;
+/// Index 2: Normal, non-cacheable (writes can still be combined).
+const MAIR: u64 = 0xFF | 0x04 << 8 | 0x44 << 16;
+
+const CACHE_LINE: usize = 64;
 
 /// T0SZ=32 (4GB), table walks write-back cacheable and inner shareable, 4KB granule,
 /// TTBR1 walks disabled (EPD1).
@@ -76,6 +81,45 @@ pub fn enable() {
             tmp = out(reg) _,
             options(nostack),
         );
+    }
+}
+
+/// Remaps the 2MB blocks covering `start..start + len` as uncached Normal memory, so
+/// memory shared with the GPU (like the framebuffer) sees writes without cache
+/// maintenance.
+///
+/// Panics if the blocks would include the kernel's own memory (image, stack or heap) or
+/// reach the peripherals: uncached kernel memory would still work, but slowly and by
+/// accident.
+pub fn make_uncached(start: usize, len: usize) {
+    extern "C" {
+        static __end: u8;
+    }
+    let kernel_end = &raw const __end as usize;
+    let first = start / BLOCK_2M;
+    let last = (start + len).div_ceil(BLOCK_2M);
+    if first * BLOCK_2M < kernel_end || last * BLOCK_2M > PERIPHERAL_BASE {
+        panic!("mmu: refusing to make {:#x}..{:#x} uncached", start, start + len);
+    }
+
+    unsafe {
+        let level2 = &raw mut LEVEL2;
+        // Break-before-make: changing a live mapping's attributes requires removing it and
+        // flushing the TLB before installing the new one.
+        for i in first..last {
+            (*level2).0[i] = 0;
+        }
+        asm!("dsb ishst", "tlbi vmalle1", "dsb ish", "isb", options(nostack));
+        for i in first..last {
+            (*level2).0[i] = (i * BLOCK_2M) as u64 | NORMAL_UNCACHED;
+        }
+        asm!("dsb ishst", "isb", options(nostack));
+
+        // Drop anything the CPU cached (or prefetched) under the old mapping.
+        for line in (first * BLOCK_2M..last * BLOCK_2M).step_by(CACHE_LINE) {
+            asm!("dc civac, {}", in(reg) line, options(nostack, preserves_flags));
+        }
+        asm!("dsb sy", options(nostack));
     }
 }
 

@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "RustyPI"
 version = "0.1.0"
+dependencies = [
+ "rustypi-core",
+]
+
+[[package]]
+name = "rustypi-core"
+version = "0.1.0"

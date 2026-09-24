@@ -8,7 +8,6 @@ mod board;
 mod commands;
 mod drivers;
 mod link;
-mod session;
 mod synchronization;
 mod sys;
 
@@ -16,7 +15,7 @@ use core::time::Duration;
 use commands::Shell;
 use drivers::uart::Uart;
 use link::{Link, Stats};
-use session::Session;
+use rustypi_core::session::Session;
 
 /// Name announced in `HELLO` frames.
 const NAME: &str = "RustyPI";
@@ -30,6 +29,9 @@ pub extern "C" fn kernel_main() -> ! {
     sys::init();
     sys::sleep(Duration::from_secs(1));
     Uart::init(link::BAUD);
+    if let Err(error) = sys::console::init() {
+        println!("no screen: {}", error);
+    }
     println!("Hello from RPi! {} {} at EL{}", NAME, sys::VERSION, sys::exception_level());
     link::send("HELLO", NAME);
 
@@ -49,7 +51,8 @@ pub extern "C" fn kernel_main() -> ! {
                 link::send("HELLO", NAME);
             }
             "MSG" => {
-                if let Some(action) = session.handle(payload, |text, reply| shell.handle(text, reply)) {
+                let run = |text, reply: &mut _| shell.handle(text, reply);
+                if let Some(action) = session.handle(payload, run, link::send_fmt) {
                     action.perform();
                 }
             }
@@ -58,7 +61,7 @@ pub extern "C" fn kernel_main() -> ! {
 
         if sys::uptime() - last_stat >= STAT_INTERVAL {
             last_stat = sys::uptime();
-            send_stat(&link.stats);
+            send_stat(link.stats());
         }
 
         sys::idle();

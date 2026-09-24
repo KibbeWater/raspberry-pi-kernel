@@ -1,26 +1,17 @@
 // print.rs
-//! `print!` / `println!` over UART0.
+//! `print!` / `println!` over UART0, mirrored to the screen console.
 //!
 //! Output is plain console text on the Arduino link, so it is passed straight
 //! through to the host. Lines must not start with `$` or they are parsed as frames.
 
 use core::fmt::{self, Write};
-use crate::drivers::uart::Uart;
-
-/// Zero-sized `fmt::Write` adapter for the UART.
-struct UartWriter;
-
-impl Write for UartWriter {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        Uart::send_string(s);
-        Ok(())
-    }
-}
+use crate::drivers::uart::UartWriter;
 
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     // UartWriter never returns an error.
     let _ = UartWriter.write_fmt(args);
+    super::console::write_fmt(args);
 }
 
 /// Prints to UART0.

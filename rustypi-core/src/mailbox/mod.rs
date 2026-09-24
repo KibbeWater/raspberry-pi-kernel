@@ -1,24 +1,48 @@
-// property.rs
-//! Typed property interface: each firmware tag is a type carrying its ID and its request and
-//! response layouts, so a request can't be paired with the wrong tag and a response can't be
-//! read at the wrong offset.
+// mailbox/mod.rs
+//! Typed VideoCore mailbox property interface: each firmware tag is a type carrying its ID
+//! and its request and response layouts, so a request can't be paired with the wrong tag
+//! and a response can't be read at the wrong offset.
 //!
 //! ```ignore
-//! let temperature = mailbox::query::<GetTemperature>(SensorId::SOC)?;
+//! let temperature = mailbox::query::<GetTemperature>(&Mailbox, SensorId::SOC)?;
 //!
 //! let mut batch = Batch::new();
 //! let revision = batch.add::<GetBoardRevision>(());
 //! let memory = batch.add::<GetArmMemory>(());
-//! let replies = batch.send()?;
+//! let replies = batch.send(&Mailbox)?;
 //! let memory = replies.get(memory)?;
 //! ```
 //!
 //! Message layout: `[size, code, (tag, value size, tag code, value words...)*, end]`.
+//! Delivering a message is left to a `Transport`: the kernel's hardware mailbox, or a
+//! fake firmware in tests.
+
+pub mod tags;
 
 use core::fmt;
 use core::marker::PhantomData;
 use core::ptr;
-use super::{call, Channel, Message, MESSAGE_WORDS};
+
+/// Size of a message buffer in 32-bit words.
+pub const MESSAGE_WORDS: usize = 256;
+
+/// A message buffer. The firmware needs 16-byte alignment, since the low four bits of the
+/// address carry the channel. Only `Batch` can create one, so every message a `Transport`
+/// sees is well formed.
+#[repr(C, align(16))]
+pub struct Message([u32; MESSAGE_WORDS]);
+
+impl Message {
+    /// The buffer, for handing its address to the firmware.
+    pub fn as_mut_ptr(&mut self) -> *mut u32 {
+        self.0.as_mut_ptr()
+    }
+}
+
+/// Delivers a property message to the firmware and waits for it to answer in place.
+pub trait Transport {
+    fn call(&self, msg: &mut Message);
+}
 
 const REQUEST: u32 = 0;
 const RESPONSE_OK: u32 = 0x8000_0000;
@@ -57,14 +81,12 @@ pub trait Tag {
 
 /// An address in the GPU's view of memory, as the firmware hands out (e.g. a framebuffer).
 /// It has to be converted before the ARM cores can use it.
-#[allow(dead_code)] // Handed out by framebuffer tags, which come next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct BusAddress(pub u32);
 
 unsafe impl Words for BusAddress {}
 
-#[allow(dead_code)]
 impl BusAddress {
     /// The same memory as seen from the ARM cores: the bus address without its cache alias
     /// bits (the top two).
@@ -165,7 +187,7 @@ impl Batch {
         Handle { offset, _tag: PhantomData }
     }
 
-    pub fn send(mut self) -> Result<Replies, MailboxError> {
+    pub fn send(mut self, transport: &impl Transport) -> Result<Replies, MailboxError> {
         if self.full {
             return Err(MailboxError::BatchFull);
         }
@@ -174,7 +196,7 @@ impl Batch {
         buf[0] = ((self.len + 1) * 4) as u32;
         buf[1] = REQUEST;
 
-        call(Channel::Property, &mut self.msg);
+        transport.call(&mut self.msg);
 
         if self.msg.0[1] != RESPONSE_OK {
             return Err(MailboxError::Firmware);
@@ -218,9 +240,155 @@ impl Replies {
 }
 
 /// Sends a single tag and returns its response.
-#[allow(dead_code)] // Part of the API; everything so far batches.
-pub fn query<T: Tag>(request: T::Request) -> Result<T::Response, MailboxError> {
+pub fn query<T: Tag>(transport: &impl Transport, request: T::Request) -> Result<T::Response, MailboxError> {
     let mut batch = Batch::new();
     let handle = batch.add::<T>(request);
-    batch.send()?.get(handle)
+    batch.send(transport)?.get(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tags::*;
+    use super::*;
+    use alloc::boxed::Box;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use core::cell::RefCell;
+
+    /// Answers each tag with `respond(id, request value words)`, or leaves it unanswered on
+    /// `None`, like the firmware. Remembers the last message it was sent.
+    struct FakeFirmware {
+        respond: Box<dyn Fn(u32, &[u32]) -> Option<Vec<u32>>>,
+        last: RefCell<Vec<u32>>,
+    }
+
+    impl FakeFirmware {
+        fn new(respond: impl Fn(u32, &[u32]) -> Option<Vec<u32>> + 'static) -> Self {
+            FakeFirmware { respond: Box::new(respond), last: RefCell::new(Vec::new()) }
+        }
+    }
+
+    impl Transport for FakeFirmware {
+        fn call(&self, msg: &mut Message) {
+            let buf = &mut msg.0;
+            let words = buf[0] as usize / 4;
+            *self.last.borrow_mut() = buf[..words].to_vec();
+            assert_eq!(buf[1], REQUEST);
+            assert_eq!(buf[words - 1], END_TAG);
+            let mut i = 2;
+            while buf[i] != END_TAG {
+                let (id, capacity) = (buf[i], buf[i + 1] as usize / 4);
+                assert_eq!(buf[i + 2], REQUEST);
+                let value = i + TAG_HEADER_WORDS;
+                if let Some(response) = (self.respond)(id, &buf[value..value + capacity]) {
+                    for (k, word) in response.iter().take(capacity).enumerate() {
+                        buf[value + k] = *word;
+                    }
+                    buf[i + 2] = TAG_RESPONSE | (response.len() * 4) as u32;
+                }
+                i = value + capacity;
+            }
+            buf[1] = RESPONSE_OK;
+        }
+    }
+
+    fn board() -> FakeFirmware {
+        FakeFirmware::new(|id, request| match id {
+            GetBoardRevision::ID => Some(vec![0xa020d3]),
+            GetFirmwareRevision::ID => Some(vec![1733399223]),
+            GetArmMemory::ID => Some(vec![0, 948 << 20]),
+            GetTemperature::ID => Some(vec![request[0], 37_000]),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn encodes_a_batch_and_decodes_each_reply() {
+        let firmware = board();
+        let mut batch = Batch::new();
+        let revision = batch.add::<GetBoardRevision>(());
+        let memory = batch.add::<GetArmMemory>(());
+        let temperature = batch.add::<GetTemperature>(SensorId(7));
+        let replies = batch.send(&firmware).unwrap();
+
+        assert_eq!(*firmware.last.borrow(), [
+            17 * 4, REQUEST,
+            GetBoardRevision::ID, 4, REQUEST, 0,
+            GetArmMemory::ID, 8, REQUEST, 0, 0,
+            // The value buffer fits the larger of request and response.
+            GetTemperature::ID, 8, REQUEST, 7, 0,
+            END_TAG,
+        ]);
+        assert_eq!(replies.get(revision).unwrap(), 0xa020d3);
+        assert_eq!(replies.get(memory).unwrap().size, 948 << 20);
+        let temperature = replies.get(temperature).unwrap();
+        assert_eq!((temperature.id.0, temperature.millidegrees), (7, 37_000));
+    }
+
+    #[test]
+    fn query_sends_a_single_tag() {
+        assert_eq!(query::<GetFirmwareRevision>(&board(), ()).unwrap(), 1733399223);
+    }
+
+    #[test]
+    fn reports_unanswered_truncated_and_short_responses() {
+        let silent = FakeFirmware::new(|_, _| None);
+        assert!(matches!(
+            query::<GetBoardRevision>(&silent, ()),
+            Err(MailboxError::Unanswered { tag: GetBoardRevision::ID }),
+        ));
+
+        let chatty = FakeFirmware::new(|_, _| Some(vec![1, 2, 3]));
+        assert!(matches!(
+            query::<GetBoardRevision>(&chatty, ()),
+            Err(MailboxError::Truncated { needed: 12, capacity: 4, .. }),
+        ));
+
+        let terse = FakeFirmware::new(|_, _| Some(vec![]));
+        assert!(matches!(
+            query::<GetArmMemory>(&terse, ()),
+            Err(MailboxError::ShortResponse { len: 0, expected: 8, .. }),
+        ));
+    }
+
+    #[test]
+    fn firmware_rejecting_the_message_is_an_error() {
+        struct Rejecting;
+        impl Transport for Rejecting {
+            fn call(&self, msg: &mut Message) {
+                msg.0[1] = 0x8000_0001;
+            }
+        }
+        assert!(matches!(query::<GetBoardRevision>(&Rejecting, ()), Err(MailboxError::Firmware)));
+    }
+
+    #[test]
+    fn handles_from_another_batch_are_caught() {
+        let firmware = board();
+        let mut first = Batch::new();
+        let _ = first.add::<GetBoardRevision>(());
+        let first = first.send(&firmware).unwrap();
+
+        let mut second = Batch::new();
+        let _ = second.add::<GetArmMemory>(());
+        let temperature = second.add::<GetTemperature>(SensorId::SOC);
+        let _ = second.send(&firmware).unwrap();
+
+        assert!(matches!(first.get(temperature), Err(MailboxError::WrongBatch { .. })));
+    }
+
+    #[test]
+    fn overfull_batches_fail_to_send() {
+        let mut batch = Batch::new();
+        for _ in 0..60 {
+            let _ = batch.add::<GetArmMemory>(());
+        }
+        assert!(matches!(batch.send(&board()), Err(MailboxError::BatchFull)));
+    }
+
+    #[test]
+    fn bus_addresses_drop_their_cache_alias() {
+        assert_eq!(BusAddress(0xC3C0_0000).to_arm(), 0x03C0_0000);
+        assert_eq!(BusAddress(0x3C00_0000).to_arm(), 0x3C00_0000);
+    }
 }
