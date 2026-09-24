@@ -12,6 +12,7 @@ use core::time::Duration;
 use rustypi_abi::layout::MAX_ARGS;
 use rustypi_abi::{DirEntry, Errno, ExitStatus, INPUT, MAX_FILE, MAX_HANDLES, MAX_PATH, MAX_READ, OUTPUT};
 use rustypi_core::elf;
+use rustypi_core::sched::TaskId;
 use rustypi_core::fat::{self, EntryKind, FatError};
 use crate::sched;
 use crate::synchronization::interface::Mutex;
@@ -55,6 +56,11 @@ impl Handles {
 
     fn free_slots(&self) -> usize {
         MAX_HANDLES - self.0.iter().filter(|slot| slot.is_some()).count()
+    }
+
+    /// Whether it holds child `id`'s handle.
+    pub(super) fn watches(&self, id: TaskId) -> bool {
+        self.0.iter().flatten().any(|open| matches!(open, Open::Child(child) if child.id() == id))
     }
 
     fn has_room(&self) -> bool {

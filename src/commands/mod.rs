@@ -104,8 +104,16 @@ impl Shell {
             None => {
                 if let Some(id) = self.foreground {
                     if process::is_running(id) {
-                        if let Err(error) = process::send_line(id, text) {
-                            reply.line(LineKind::Rsp, format_args!("task {}: {}", id.0, error));
+                        match process::send_line(id, text) {
+                            // Said once per line that goes to a program that isn't asking,
+                            // so typing doesn't seem to vanish.
+                            Ok(delivered) if !delivered.reading => reply.line(LineKind::Rsp, format_args!(
+                                "{} (task {}) isn't reading input; the line waits for it. !<command> for the shell",
+                                delivered.name,
+                                delivered.task.0,
+                            )),
+                            Ok(_) => {}
+                            Err(error) => reply.line(LineKind::Rsp, format_args!("task {}: {}", id.0, error)),
                         }
                         return None;
                     }

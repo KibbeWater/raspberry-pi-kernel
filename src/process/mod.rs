@@ -153,6 +153,8 @@ struct Running {
     heap_end: u64,
     /// Input sent to it and not read yet.
     input: VecDeque<u8>,
+    /// Whether it is waiting in `Read` for typed input right now.
+    reading_input: bool,
     /// Files, directories and children it has open.
     handles: handles::Handles,
     /// The child it is waiting on, which gets its input meanwhile.
@@ -284,6 +286,7 @@ fn spawn_with(name: &str, code: Code, args: &str, io: Io, parent: Option<TaskId>
         killed: false,
         heap_end: program_end.next_multiple_of(PAGE_SIZE as u64),
         input: VecDeque::new(),
+        reading_input: false,
         handles: handles::Handles::new(),
         waiting_for: None,
         fp: Box::new(FpState::new()),
@@ -322,8 +325,8 @@ impl fmt::Display for InputError {
 
 /// Gives the program running as task `id` a line of input, for its `Read`s. While it waits on
 /// a child, the child gets it instead (or the child's child, and so on).
-pub fn send_line(id: TaskId, line: &str) -> Result<(), InputError> {
-    PROCESSES.lock(|processes| {
+pub fn send_line(id: TaskId, line: &str) -> Result<Delivered, InputError> {
+    let delivered = PROCESSES.lock(|processes| {
         let mut target = id;
         while let Some(child) = processes.get(&target).and_then(|running| running.waiting_for) {
             if !processes.contains_key(&child) {
@@ -337,10 +340,18 @@ pub fn send_line(id: TaskId, line: &str) -> Result<(), InputError> {
         }
         running.input.extend(line.as_bytes());
         running.input.push_back(b'\n');
-        Ok(())
+        Ok(Delivered { task: target, name: running.name.clone(), reading: running.reading_input })
     })?;
     sched::notify(sched::PROGRAM_INPUT);
-    Ok(())
+    Ok(delivered)
+}
+
+/// Where `send_line` put a line.
+pub struct Delivered {
+    pub task: TaskId,
+    pub name: String,
+    /// Whether it was waiting for input; if not, the line waits until it reads.
+    pub reading: bool,
 }
 
 #[derive(Debug)]
@@ -500,9 +511,18 @@ fn read_typed(ptr: u64, len: u64) -> Result<u64, Errno> {
     if len == 0 {
         return Ok(0);
     }
+    let set_reading = |reading| {
+        PROCESSES.lock(|processes| {
+            if let Some(running) = processes.get_mut(&id) {
+                running.reading_input = reading;
+            }
+        })
+    };
+    set_reading(true);
     sched::wait_until(sched::PROGRAM_INPUT, || {
         PROCESSES.lock(|processes| processes.get(&id).is_none_or(|running| running.killed || !running.input.is_empty()))
     });
+    set_reading(false);
     PROCESSES.lock(|processes| {
         let running = processes.get_mut(&id).expect("a user task has a process");
         let mut buf = [0; MAX_READ];
@@ -627,8 +647,14 @@ fn exit(status: Exit) -> ! {
         fp::set_owner(None);
     }
     running.exit.lock(|exit| *exit = Some(status));
-    // A parent reports its children's exits itself; crashes are always worth the details.
-    if running.parent.is_none() || matches!(status, Exit::Crashed(_)) {
+    // A parent still watching (holding its handle, or waiting on it) reports the exit itself;
+    // otherwise nobody would. Crashes are always worth the details.
+    let watched = running.parent.is_some_and(|parent| {
+        PROCESSES.lock(|processes| {
+            processes.get(&parent).is_some_and(|parent| parent.waiting_for == Some(id) || parent.handles.watches(id))
+        })
+    });
+    if !watched || matches!(status, Exit::Crashed(_)) {
         println!("[{}] {} {}", id.0, running.name, status);
     }
     // sched::exit never returns, so nothing would drop it.
