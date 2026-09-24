@@ -1,13 +1,37 @@
 #!/bin/bash
-set -e
+# Builds kernel8.img and installs it on the SD card if it is mounted.
+#
+#   ./build.sh           build, then install if the card is mounted
+#   ./build.sh --eject   also eject the card after installing
+set -euo pipefail
+cd "$(dirname "$0")"
 
 TARGET=aarch64-unknown-none-softfloat
+IMAGE=target/kernel8.img
+BOOTFS=/Volumes/bootfs
+
+EJECT=0
+for arg in "$@"; do
+    case "$arg" in
+        --eject) EJECT=1 ;;
+        *) echo "unknown option: $arg" >&2; exit 2 ;;
+    esac
+done
+
 cargo build --release
+rust-objcopy --strip-all -O binary "target/$TARGET/release/RustyPI" "$IMAGE"
+echo "Built $IMAGE ($(wc -c < "$IMAGE" | tr -d ' ') bytes)"
 
-echo "Stripping to raw binary"
-rust-objcopy --strip-all -O binary target/$TARGET/release/RustyPI target/kernel8.img
+if [ ! -d "$BOOTFS" ]; then
+    echo -e "\033[33mSD card not mounted at $BOOTFS, skipped install\033[0m" >&2
+    exit 0
+fi
 
-if [ -d /Volumes/bootfs ]; then
-    echo "Copying kernel8.img to /Volumes/bootfs"
-    cp target/kernel8.img /Volumes/bootfs/kernel8.img
+cp "$IMAGE" "$BOOTFS/kernel8.img"
+sync
+cmp -s "$IMAGE" "$BOOTFS/kernel8.img" || { echo "Install failed: $BOOTFS/kernel8.img differs" >&2; exit 1; }
+echo "Installed to $BOOTFS/kernel8.img"
+
+if [ "$EJECT" = 1 ]; then
+    diskutil eject "$BOOTFS"
 fi
