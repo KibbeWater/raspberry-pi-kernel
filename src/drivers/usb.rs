@@ -497,6 +497,7 @@ impl Host {
         let base = Transaction {
             target: endpoint.target,
             endpoint: endpoint.endpoint,
+            max_packet: endpoint.max_packet,
             kind: Kind::Interrupt,
             direction: Direction::In,
             pid: toggle.0,
@@ -605,6 +606,7 @@ impl Host {
             let t = Transaction {
                 target: endpoint.target,
                 endpoint: endpoint.endpoint,
+                max_packet: endpoint.max_packet,
                 kind: Kind::Bulk,
                 direction,
                 pid: toggle.0,
@@ -649,7 +651,7 @@ impl Host {
         write(channel(n, CHAN_SPLIT), t.split);
         write(channel(n, CHAN_XFER_SIZE), t.length as u32 | t.packets << 19 | (t.pid as u32) << 29);
         write(channel(n, CHAN_DMA), bus_address + t.offset as u32);
-        let mut character = t.target.max_packet as u32 & 0x7FF
+        let mut character = t.max_packet as u32 & 0x7FF
             | (t.endpoint as u32 & 0xF) << 11
             | (t.kind as u32) << 18
             | CHAR_MULTI_COUNT_1
@@ -695,6 +697,9 @@ enum Buffer {
 struct Transaction {
     target: Target,
     endpoint: u8,
+    /// The endpoint's own: endpoint 0's is the target's, but others' can differ (512 bytes
+    /// for high speed bulk endpoints, say).
+    max_packet: u16,
     kind: Kind,
     direction: Direction,
     pid: Pid,
@@ -715,6 +720,7 @@ impl Transaction {
         Transaction {
             target,
             endpoint: 0,
+            max_packet: target.max_packet,
             kind: Kind::Control,
             direction,
             pid,
