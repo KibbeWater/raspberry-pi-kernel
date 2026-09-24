@@ -1,6 +1,7 @@
 pub mod framebuffer;
 pub mod gpio;
 pub mod interrupt;
+pub mod lan7800;
 pub mod local;
 pub mod mailbox;
 pub mod mmio;
