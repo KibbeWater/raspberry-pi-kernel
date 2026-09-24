@@ -12,6 +12,7 @@
 //! it can sleep, block or be preempted like any kernel task, and its registers wait in the
 //! saved `ExceptionContext` until it returns.
 
+mod buffer;
 mod handles;
 mod pipe;
 mod programs;

@@ -10,7 +10,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 use rustypi_abi::layout::MAX_ARGS;
-use rustypi_abi::{DirEntry, Errno, ExitStatus, INPUT, MAX_FILE, MAX_HANDLES, MAX_PATH, MAX_READ, OUTPUT};
+use rustypi_abi::{DirEntry, Errno, ExitStatus, INPUT, MAX_HANDLES, MAX_PATH, MAX_READ, OUTPUT};
 use rustypi_core::elf;
 use rustypi_core::sched::TaskId;
 use rustypi_core::fat::{self, EntryKind, FatError};
@@ -19,17 +19,18 @@ use crate::synchronization::interface::Mutex;
 use crate::sys::console::{self, LendError};
 use crate::sys::fs::{self, FsError};
 use rustypi_abi::ScreenSize;
+use super::buffer::FileBuffer;
 use super::pipe::{End, PipeEnd};
 use super::{copy_from_user, read_pipe, was_killed, write_pipe, Code, Exit, Io, Process, Running, SpawnError, Stream, PROCESSES};
 
 enum Open {
-    File { data: Vec<u8>, position: usize },
+    File { data: FileBuffer, position: usize },
     Dir { entries: Vec<fat::DirEntry>, position: usize },
     Child(Process),
     Pipe(PipeEnd),
     Screen(console::Lease),
     /// A file being written: it all goes to the card when the handle is closed.
-    NewFile { path: String, data: Vec<u8> },
+    NewFile { path: String, data: FileBuffer },
 }
 
 /// The first handle `Handles` gives out; below it are `INPUT` and `OUTPUT`.
@@ -115,7 +116,7 @@ fn user_string(ptr: u64, len: u64, max: usize) -> Result<String, Errno> {
 }
 
 pub(super) fn open(path: u64, len: u64) -> Result<u64, Errno> {
-    let data = fs::read_file(&user_string(path, len, MAX_PATH)?).map_err(errno)?;
+    let data = FileBuffer::adopt(fs::read_file(&user_string(path, len, MAX_PATH)?).map_err(errno)?)?;
     with_running(|running| running.handles.insert(Open::File { data, position: 0 }))
 }
 
@@ -164,10 +165,7 @@ pub(super) fn write(handle: u64, ptr: u64, len: u64) -> Result<u64, Errno> {
     let bytes = copy_from_user(ptr, &mut buf[..len.min(MAX_READ as u64) as usize])?;
     with_running(|running| match running.handles.get_mut(handle)? {
         Open::NewFile { data, .. } => {
-            if data.len() + bytes.len() > MAX_FILE {
-                return Err(Errno::NoSpace);
-            }
-            data.extend_from_slice(bytes);
+            data.extend(bytes)?;
             Ok(bytes.len() as u64)
         }
         _ => Err(Errno::BadHandle),
@@ -178,7 +176,7 @@ pub(super) fn write(handle: u64, ptr: u64, len: u64) -> Result<u64, Errno> {
 pub(super) fn create(path: u64, len: u64) -> Result<u64, Errno> {
     let path = user_string(path, len, MAX_PATH)?;
     fs::check_writable(&path).map_err(errno)?;
-    with_running(|running| running.handles.insert(Open::NewFile { path, data: Vec::new() }))
+    with_running(|running| running.handles.insert(Open::NewFile { path, data: FileBuffer::new() }))
 }
 
 pub(super) fn remove(path: u64, len: u64) -> Result<u64, Errno> {
@@ -308,7 +306,7 @@ pub(super) fn spawn(path: u64, path_len: u64, args: u64, args_len: u64, input: u
         }
         Ok(Io { input: stream_for(running, input, End::Read)?, output: stream_for(running, output, End::Write)? })
     })?;
-    let file = fs::read_file(&path).map_err(errno)?;
+    let file = FileBuffer::adopt(fs::read_file(&path).map_err(errno)?)?;
     let program = elf::parse(&file).map_err(|_| Errno::NotExecutable)?;
     let name = path.rsplit('/').next().unwrap_or(&path);
     let parent = sched::current();
