@@ -102,10 +102,11 @@ fn with_fs<R>(f: impl FnOnce(&mut Mounted) -> Result<R, FsError>) -> Result<R, F
     FS.lock(|fs| fs.as_mut().map_or(Err(FsError::NotMounted), f))
 }
 
-/// Like `with_fs`, for changing the volume: entries get the time now, if the clock knows it.
+/// Like `with_fs`, for changing the volume: entries get the local time now (FAT's way, and
+/// what other systems write), if the clock knows it.
 fn with_fs_writing<R>(f: impl FnOnce(&mut Mounted) -> Result<R, FsError>) -> Result<R, FsError> {
     with_fs(|fs| {
-        if let Some(now) = super::clock::now() {
+        if let Some((now, _)) = super::clock::now() {
             fs.fat.set_time(now);
         }
         f(fs)

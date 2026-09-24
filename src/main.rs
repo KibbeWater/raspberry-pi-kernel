@@ -77,7 +77,10 @@ pub extern "C" fn kernel_main() -> ! {
         Err(error) => println!("memory: no pages for programs: {}", error),
     }
     match sys::fs::mount() {
-        Ok(info) => println!("sd: {:?} volume '{}' mounted", info.fat_type, info.label),
+        Ok(info) => {
+            println!("sd: {:?} volume '{}' mounted", info.fat_type, info.label);
+            sys::clock::load_zone();
+        }
         Err(error) => println!("sd: {}", error),
     }
     link::send("HELLO", NAME);

@@ -3,6 +3,7 @@
 
 use core::time::Duration;
 use rustypi_core::net::Ipv4;
+use rustypi_core::time::Zone;
 use rustypi_core::session::{LineKind, Reply};
 use super::{Command, Outcome, Shell};
 use crate::sys;
@@ -12,7 +13,8 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "net", args: "", description: "Ethernet link, MAC and IP address", run: net },
     Command { name: "ping", args: "<host> [count]", description: "ping a name or IPv4 address (4 times unless told)", run: ping },
     Command { name: "host", args: "<name>", description: "look a name up with DNS", run: host },
-    Command { name: "date", args: "", description: "the date and time (UTC), once the network has set the clock", run: date },
+    Command { name: "date", args: "", description: "the date and time, once the network has set the clock", run: date },
+    Command { name: "timezone", args: "[utc|sv]", description: "show or change (and save) the time zone", run: timezone },
     Command { name: "update", args: "", description: "take a new kernel over the network for a minute (tools/deploy.py)", run: update },
 ];
 
@@ -93,8 +95,24 @@ fn date<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
         return Outcome::Usage;
     }
     match sys::clock::now() {
-        Some(now) => reply.line(LineKind::Rsp, format_args!("{now} UTC")),
+        Some((now, zone)) => reply.line(LineKind::Rsp, format_args!("{now} {zone}")),
         None => reply.rsp("date: the clock isn't set yet (it needs the network)"),
+    }
+    Outcome::Done
+}
+
+fn timezone<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+    if args.is_empty() {
+        let names: alloc::vec::Vec<_> = Zone::ALL.iter().map(|zone| zone.name()).collect();
+        reply.line(LineKind::Rsp, format_args!("time zone: {} (of {})", sys::clock::zone().name(), names.join(", ")));
+        return Outcome::Done;
+    }
+    let Some(zone) = Zone::from_name(&args.to_ascii_lowercase()) else {
+        return Outcome::Usage;
+    };
+    match sys::clock::set_zone(zone) {
+        Ok(()) => reply.line(LineKind::Rsp, format_args!("time zone: {}, saved", zone.name())),
+        Err(error) => reply.line(LineKind::Rsp, format_args!("time zone: {}, but not saved: {}", zone.name(), error)),
     }
     Outcome::Done
 }

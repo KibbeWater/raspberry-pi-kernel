@@ -214,8 +214,8 @@ impl ClockSync {
         clock::set(unix_us);
         if !self.set_once {
             self.set_once = true;
-            if let Some(date) = clock::now() {
-                println!("clock: {date} UTC, from {server}");
+            if let Some((date, zone)) = clock::now() {
+                println!("clock: {date} {zone}, from {server}");
             }
         }
         self.sync = Sync::Waiting { next_at: now + RESYNC_US };
