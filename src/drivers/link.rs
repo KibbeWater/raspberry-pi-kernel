@@ -10,6 +10,9 @@
 //! `HH` is the XOR of every byte between `$` and `*`, as two uppercase hex digits.
 //! Lines that do not start with `$` are plain console text; the Arduino passes them
 //! straight through to the host, so `Uart::send_string` logging keeps working.
+//!
+//! A `$` always starts a new frame, so line noise before a frame can't swallow it.
+//! Payloads therefore must not contain `$`.
 
 use crate::drivers::uart::Uart;
 
@@ -19,16 +22,36 @@ pub const BAUD: u32 = 38_400;
 /// Longest line (excluding the `\n`) we accept. Keep in sync with the Arduino sketch.
 const MAX_LINE: usize = 96;
 
+/// Receive-side counters, reported to the Arduino in `STAT` frames.
+pub struct Stats {
+    /// Bytes read from the UART, damaged or not.
+    pub rx_bytes: u32,
+    /// Bytes the UART flagged with a framing, parity, break or overrun error.
+    pub rx_errors: u32,
+    /// Partial or non-frame lines thrown away.
+    pub dropped: u32,
+    /// Frames with a bad checksum or layout.
+    pub bad_frames: u32,
+    /// Lines longer than `MAX_LINE`.
+    pub overflows: u32,
+}
+
 /// Line assembler for incoming UART bytes.
 pub struct Link {
     buf: [u8; MAX_LINE],
     len: usize,
     overflow: bool,
+    pub stats: Stats,
 }
 
 impl Link {
     pub const fn new() -> Self {
-        Link { buf: [0; MAX_LINE], len: 0, overflow: false }
+        Link {
+            buf: [0; MAX_LINE],
+            len: 0,
+            overflow: false,
+            stats: Stats { rx_bytes: 0, rx_errors: 0, dropped: 0, bad_frames: 0, overflows: 0 },
+        }
     }
 
     /// Drains the UART receive FIFO and calls `on_frame(kind, payload)` for every
@@ -36,35 +59,69 @@ impl Link {
     ///
     /// Malformed frames are answered with an `ERR` frame; plain text lines are dropped.
     pub fn poll(&mut self, mut on_frame: impl FnMut(&str, &str)) {
-        while let Some(byte) = Uart::receive() {
+        while let Some(received) = Uart::receive_checked() {
+            self.stats.rx_bytes = self.stats.rx_bytes.wrapping_add(1);
+            let byte = match received {
+                Ok(byte) => byte,
+                Err(_) => {
+                    // The line this byte belonged to is damaged; discard it.
+                    self.stats.rx_errors = self.stats.rx_errors.wrapping_add(1);
+                    self.discard();
+                    continue;
+                }
+            };
             match byte {
                 b'\r' => {}
                 b'\n' => {
                     if self.overflow {
+                        self.stats.overflows = self.stats.overflows.wrapping_add(1);
                         send("ERR", "line too long");
-                    } else {
-                        dispatch(&self.buf[..self.len], &mut on_frame);
+                    } else if self.len > 0 {
+                        self.dispatch(&mut on_frame);
                     }
                     self.len = 0;
                     self.overflow = false;
                 }
-                _ if self.len < MAX_LINE => {
-                    self.buf[self.len] = byte;
-                    self.len += 1;
+                b'$' => {
+                    self.discard();
+                    self.push(byte);
                 }
-                _ => self.overflow = true,
+                _ => self.push(byte),
             }
         }
     }
-}
 
-fn dispatch(line: &[u8], on_frame: &mut impl FnMut(&str, &str)) {
-    if line.first() != Some(&b'$') {
-        return;
+    fn push(&mut self, byte: u8) {
+        if self.len < MAX_LINE {
+            self.buf[self.len] = byte;
+            self.len += 1;
+        } else {
+            self.overflow = true;
+        }
     }
-    match parse(line) {
-        Some((kind, payload)) => on_frame(kind, payload),
-        None => send("ERR", "bad frame"),
+
+    /// Throws away the partial line, counting it if there was one.
+    fn discard(&mut self) {
+        if self.len > 0 || self.overflow {
+            self.stats.dropped = self.stats.dropped.wrapping_add(1);
+        }
+        self.len = 0;
+        self.overflow = false;
+    }
+
+    fn dispatch(&mut self, on_frame: &mut impl FnMut(&str, &str)) {
+        let line = &self.buf[..self.len];
+        if line[0] != b'$' {
+            self.stats.dropped = self.stats.dropped.wrapping_add(1);
+            return;
+        }
+        match parse(line) {
+            Some((kind, payload)) => on_frame(kind, payload),
+            None => {
+                self.stats.bad_frames = self.stats.bad_frames.wrapping_add(1);
+                send("ERR", "bad frame");
+            }
+        }
     }
 }
 

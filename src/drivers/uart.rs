@@ -9,6 +9,10 @@ const UART0_BASE: usize = 0x3F201000;
 const UART_FR_TXFF: u32 = 1 << 5; // Transmit FIFO full
 const UART_FR_RXFE: u32 = 1 << 4; // Receive FIFO empty
 
+/// Error bits in the Data Register that accompany a damaged received byte:
+/// framing (8), parity (9), break (10) and overrun (11).
+const UART_DR_ERRORS: u32 = 0xF << 8;
+
 /// Bit flags for the UART Control Register.
 const UART_CR_UARTEN: u32 = 1 << 0; // UART enable
 const UART_CR_TXE: u32 = 1 << 8;    // Transmit enable
@@ -133,6 +137,18 @@ impl Uart {
         } else {
             Some((read_reg(&uart.dr) & 0xFF) as u8)
         }
+    }
+
+    /// Like `receive`, but returns `Err(byte)` when the UART flagged the byte as
+    /// damaged (framing, parity, break or overrun error).
+    pub fn receive_checked() -> Option<Result<u8, u8>> {
+        let uart = uart_regs();
+        if (read_reg(&uart.fr) & UART_FR_RXFE) != 0 {
+            return None;
+        }
+        let dr = read_reg(&uart.dr);
+        let byte = (dr & 0xFF) as u8;
+        Some(if dr & UART_DR_ERRORS != 0 { Err(byte) } else { Ok(byte) })
     }
 
     /// Sends a string over UART.

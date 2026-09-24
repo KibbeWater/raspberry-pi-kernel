@@ -7,7 +7,7 @@ mod synchronization;
 
 use core::arch::{asm, global_asm};
 use drivers::gpio::{write_pin, set_pin_mode, PinMode, Pin};
-use drivers::link::{self, Link};
+use drivers::link::{self, Link, Stats};
 use drivers::time::{sleep, system_time};
 use drivers::uart::Uart;
 
@@ -31,6 +31,7 @@ pub extern "C" fn _start() -> ! {
     // Poll continuously: the PL011 RX FIFO only holds 16 bytes (~4ms at 38400 baud),
     // so nothing in this loop may block.
     let mut link = Link::new();
+    let mut last_stat = system_time();
     loop {
         link.poll(|kind, payload| match kind {
             "PING" => link::send("PONG", payload),
@@ -38,7 +39,30 @@ pub extern "C" fn _start() -> ! {
             "MSG" => handle_command(payload, led, &mut led_on),
             _ => link::send_parts("ERR", &["unknown kind ", kind]),
         });
+
+        if system_time().wrapping_sub(last_stat) >= STAT_INTERVAL_US {
+            last_stat = system_time();
+            send_stat(&link.stats);
+        }
     }
+}
+
+/// How often the Pi reports its receive counters, even when nothing talks to it.
+const STAT_INTERVAL_US: u32 = 5_000_000;
+
+/// Sends a `STAT` frame so the Arduino can tell "Pi hung" apart from "Pi alive but
+/// receiving garbage".
+fn send_stat(stats: &Stats) {
+    let mut bufs = [[0; 10]; 6];
+    let [up, rx, err, drop, bad, long] = &mut bufs;
+    link::send_parts("STAT", &[
+        "up=", link::fmt_u32(system_time() / 1_000_000, up),
+        " rx=", link::fmt_u32(stats.rx_bytes, rx),
+        " err=", link::fmt_u32(stats.rx_errors, err),
+        " drop=", link::fmt_u32(stats.dropped, drop),
+        " bad=", link::fmt_u32(stats.bad_frames, bad),
+        " long=", link::fmt_u32(stats.overflows, long),
+    ]);
 }
 
 /// Handles a `MSG` frame from the Arduino and answers with an `RSP` frame.
