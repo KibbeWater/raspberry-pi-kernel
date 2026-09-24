@@ -16,7 +16,7 @@ pub mod link;
 pub mod lock;
 pub mod mailbox;
 pub mod mbr;
+pub mod paging;
 pub mod sched;
 pub mod sd;
 pub mod session;
-pub mod user;

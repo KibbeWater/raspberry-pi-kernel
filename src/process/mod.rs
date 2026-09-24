@@ -2,9 +2,9 @@
 //! User programs: tasks that run at EL0 and reach the kernel only through system calls
 //! (`rustypi_abi`). A program that faults is killed and the kernel carries on.
 //!
-//! For now every program shares the one user window (`mmu::USER_BASE`): the built-in
-//! programs' code is copied to its start by `init`, and each running program gets one of the
-//! stack slots in its second half.
+//! Each program has its own address space (`rustypi_core::paging`) and ASID: its code,
+//! read-only and executable, at the start of the user window, and a stack just below the
+//! top. Everything else is unmapped, so running off either end of the stack faults.
 //!
 //! A system call runs like task code on the program's kernel stack, with interrupts enabled:
 //! it can sleep, block or be preempted like any kernel task, and its registers wait in the
@@ -19,21 +19,20 @@ use alloc::sync::Arc;
 use core::fmt;
 use core::time::Duration;
 use rustypi_abi::{encode_result, Errno, Registers, Syscall, MAX_WRITE, SVC_SYSCALL};
+use rustypi_core::paging::{Access, AddressSpace, PAGE_SIZE, USER_BASE, USER_END};
 use rustypi_core::sched::TaskId;
-use rustypi_core::user::Region;
 use crate::arch::exception::{self, ExceptionContext, CLASS_SVC};
 use crate::arch::{self, mmu};
 use crate::drivers::timer;
+use crate::sched::{self, UserStart};
 use crate::synchronization::{interface::Mutex, IrqLock};
-use crate::{print, println, sched};
+use crate::{print, println};
 
-/// The memory programs may hand to system calls.
-const USER_MEMORY: Region = Region::new(mmu::USER_BASE as u64, mmu::USER_SIZE as u64);
-
-/// Program code fills the first half of the user window, stacks the second.
-const CODE_SIZE: usize = mmu::USER_SIZE / 2;
-const STACK_SLOTS: usize = 16;
-const USER_STACK_SIZE: usize = (mmu::USER_SIZE - CODE_SIZE) / STACK_SLOTS;
+/// Where program code goes.
+const CODE_BASE: u64 = USER_BASE;
+/// The stack ends a page below the top of the window, with unmapped pages on either side.
+const STACK_TOP: u64 = USER_END - PAGE_SIZE as u64;
+const STACK_SIZE: u64 = 64 * 1024;
 
 /// How a program ended.
 #[derive(Clone, Copy, Debug)]
@@ -78,35 +77,62 @@ impl fmt::Display for Exit {
 
 #[derive(Debug)]
 pub enum SpawnError {
-    /// Every user stack slot is taken.
+    /// Every ASID is taken.
     TooManyPrograms,
 }
 
 impl fmt::Display for SpawnError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            SpawnError::TooManyPrograms => write!(f, "too many programs running (at most {})", STACK_SLOTS),
+            SpawnError::TooManyPrograms => write!(f, "too many programs running (at most {})", Asid::COUNT - 1),
         }
     }
 }
 
+/// An address space identifier, which tags the program's TLB entries. Given back when
+/// dropped, which must come after flushing the TLB.
+struct Asid(u8);
+
+/// Bit `n` is set while ASID `n` is in use. ASID 0 is the kernel's.
+static ASIDS: IrqLock<[u64; Asid::COUNT / 64]> = IrqLock::new([1, 0, 0, 0]);
+
+impl Asid {
+    /// With 8-bit ASIDs (TCR_EL1.AS = 0).
+    const COUNT: usize = 256;
+
+    fn allocate() -> Option<Asid> {
+        ASIDS.lock(|used| {
+            let n = (0..Asid::COUNT).find(|&n| used[n / 64] & 1 << (n % 64) == 0)?;
+            used[n / 64] |= 1 << (n % 64);
+            Some(Asid(n as u8))
+        })
+    }
+}
+
+impl Drop for Asid {
+    fn drop(&mut self) {
+        let n = self.0 as usize;
+        ASIDS.lock(|used| used[n / 64] &= !(1 << (n % 64)));
+    }
+}
+
 /// What the kernel keeps about a running program.
-struct Record {
+struct Running {
     name: &'static str,
-    stack_slot: usize,
-    /// Set just before its task finishes.
-    exit: IrqLock<Option<Exit>>,
+    memory: AddressSpace,
+    /// Held until the program is gone; only its release matters.
+    _asid: Asid,
+    /// Where its exit goes, for whoever waits on it.
+    exit: Arc<IrqLock<Option<Exit>>>,
 }
 
 /// Running programs, by task.
-static PROCESSES: IrqLock<BTreeMap<TaskId, Arc<Record>>> = IrqLock::new(BTreeMap::new());
-/// Bit `n` is set while stack slot `n` is in use.
-static STACKS: IrqLock<u32> = IrqLock::new(0);
+static PROCESSES: IrqLock<BTreeMap<TaskId, Running>> = IrqLock::new(BTreeMap::new());
 
 /// A started program.
 pub struct Process {
     id: TaskId,
-    record: Arc<Record>,
+    exit: Arc<IrqLock<Option<Exit>>>,
 }
 
 impl Process {
@@ -117,41 +143,39 @@ impl Process {
     /// Waits for the program to end.
     pub fn wait(&self) -> Exit {
         sched::join(self.id);
-        self.record.exit.lock(|exit| exit.expect("a finished program has an exit"))
+        self.exit.lock(|exit| exit.expect("a finished program has an exit"))
     }
 }
 
-/// Copies the built-in programs into the user window. Call once the MMU is on.
-pub fn init() {
-    let image = programs::image();
-    assert!(image.len() <= CODE_SIZE, "built-in programs don't fit the user window");
-    unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), mmu::USER_BASE as *mut u8, image.len()) };
-    mmu::sync_instruction_cache(mmu::USER_BASE, image.len());
-}
+/// Starts a built-in program in an address space of its own, with `arg` in x0.
+pub fn spawn(program: &Program, arg: u64) -> Result<Process, SpawnError> {
+    let asid = Asid::allocate().ok_or(SpawnError::TooManyPrograms)?;
+    let mut memory = AddressSpace::new(mmu::kernel_table());
 
-/// Starts a built-in program.
-pub fn spawn(program: &Program) -> Result<Process, SpawnError> {
-    let slot = STACKS
-        .lock(|used| {
-            let free = used.trailing_ones() as usize;
-            (free < STACK_SLOTS).then(|| {
-                *used |= 1 << free;
-                free
-            })
-        })
-        .ok_or(SpawnError::TooManyPrograms)?;
-    let bottom = mmu::USER_BASE + CODE_SIZE + slot * USER_STACK_SIZE;
-    // Don't let a program read what the last one left on the stack.
-    unsafe { core::ptr::write_bytes(bottom as *mut u8, 0, USER_STACK_SIZE) };
+    let code = programs::image();
+    memory.map_range(CODE_BASE, code.len() as u64, Access::ReadExecute).expect("code fits the window");
+    memory.load(CODE_BASE, code).expect("code pages are mapped");
+    for va in (CODE_BASE..CODE_BASE + code.len() as u64).step_by(PAGE_SIZE) {
+        let (frame, _) = memory.translate(va).expect("code pages are mapped");
+        mmu::sync_instruction_cache(frame as usize, PAGE_SIZE);
+    }
+    memory.map_range(STACK_TOP - STACK_SIZE, STACK_SIZE, Access::ReadWrite).expect("stack fits the window");
 
-    let record = Arc::new(Record { name: program.name, stack_slot: slot, exit: IrqLock::new(None) });
+    let start = UserStart {
+        translation_base: memory.translation_base(asid.0),
+        entry: CODE_BASE + program.offset() as u64,
+        stack_top: STACK_TOP,
+        arg,
+    };
+    let exit = Arc::new(IrqLock::new(None));
+    let running = Running { name: program.name, memory, _asid: asid, exit: exit.clone() };
     // Registered under the lock, so the program can't make a system call before it is known.
     let id = PROCESSES.lock(|processes| {
-        let id = sched::spawn_user(program.name, program.entry(), bottom + USER_STACK_SIZE);
-        processes.insert(id, record.clone());
+        let id = sched::spawn_user(program.name, start);
+        processes.insert(id, running);
         id
     });
-    Ok(Process { id, record })
+    Ok(Process { id, exit })
 }
 
 /// Handles a synchronous exception from EL0: a system call, or a fault that kills the program.
@@ -198,14 +222,15 @@ fn write(ptr: u64, len: u64) -> Result<u64, Errno> {
     Ok(len as u64)
 }
 
-/// Copies program memory at `addr` into `buf`, if it is all program memory. Other programs
-/// share the window and could change it meanwhile, so the kernel only works on the copy.
+/// Copies the running program's memory at `addr` into `buf`, if the program could read all of
+/// it. Goes through its page tables rather than its pointer, so a bad address is an error
+/// here instead of a fault in the kernel.
 fn copy_from_user(addr: u64, buf: &mut [u8]) -> Result<&[u8], Errno> {
-    if !USER_MEMORY.contains(addr, buf.len() as u64) {
-        return Err(Errno::Fault);
-    }
-    // The whole window is mapped, so the checked range can't fault.
-    unsafe { core::ptr::copy_nonoverlapping(addr as *const u8, buf.as_mut_ptr(), buf.len()) };
+    let id = sched::current();
+    PROCESSES.lock(|processes| {
+        let running = processes.get(&id).expect("a user task has a process");
+        running.memory.read_user(addr, buf).map_err(|_| Errno::Fault)
+    })?;
     Ok(buf)
 }
 
@@ -227,11 +252,14 @@ impl fmt::Display for PlainText<'_> {
 /// Ends the running program. Called on its kernel stack, with IRQs enabled.
 fn exit(status: Exit) -> ! {
     let id = sched::current();
-    let record = PROCESSES.lock(|processes| processes.remove(&id)).expect("a user task has a process");
-    record.exit.lock(|exit| *exit = Some(status));
-    STACKS.lock(|used| *used &= !(1 << record.stack_slot));
-    println!("[{}] {} {}", id.0, record.name, status);
+    let running = PROCESSES.lock(|processes| processes.remove(&id)).expect("a user task has a process");
+    // Off its page tables before they are freed, and nothing cached may still point into them
+    // (or be tagged with its ASID, which goes back to the pool).
+    sched::leave_user_space();
+    mmu::flush_tlb();
+    running.exit.lock(|exit| *exit = Some(status));
+    println!("[{}] {} {}", id.0, running.name, status);
     // sched::exit never returns, so nothing would drop it.
-    drop(record);
+    drop(running);
     sched::exit()
 }

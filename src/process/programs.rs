@@ -6,7 +6,7 @@
 
 use core::arch::global_asm;
 use rustypi_abi::{Errno, Number};
-use super::{Exit, mmu};
+use super::Exit;
 
 global_asm!(
     include_str!("programs.s"),
@@ -29,11 +29,16 @@ extern "C" {
     fn user_fault();
     fn user_privileged();
     fn user_float();
+    fn user_isolated();
+    fn user_overflow();
+    fn user_write_code();
+    fn user_run_stack();
 }
 
 /// ESR_EL1 exception classes the crashing programs should die of.
 const CLASS_UNKNOWN: u64 = 0x00;
 const CLASS_FP: u64 = 0x07;
+const CLASS_INSTRUCTION_ABORT_EL0: u64 = 0x20;
 const CLASS_DATA_ABORT_EL0: u64 = 0x24;
 
 pub struct Program {
@@ -41,15 +46,14 @@ pub struct Program {
     pub description: &'static str,
     /// How it ends when the kernel works.
     pub expected: Expected,
-    /// Its code in the kernel image. It runs from the copy in the user window.
+    /// Its code in the kernel image. It runs from a copy in its own address space.
     code: unsafe extern "C" fn(),
 }
 
 impl Program {
-    /// Where it starts in the user window.
-    pub fn entry(&self) -> usize {
-        let start = &raw const user_image_start as usize;
-        mmu::USER_BASE + (self.code as usize - start)
+    /// Where it starts, from the start of `image`.
+    pub fn offset(&self) -> usize {
+        self.code as usize - &raw const user_image_start as usize
     }
 }
 
@@ -102,6 +106,30 @@ pub const PROGRAMS: &[Program] = &[
         description: "use a floating point register",
         expected: Expected::Crashes(CLASS_FP),
         code: user_float,
+    },
+    Program {
+        name: "isolated",
+        description: "keep x0 in memory across a sleep; run twice",
+        expected: Expected::Exits(0),
+        code: user_isolated,
+    },
+    Program {
+        name: "overflow",
+        description: "grow the stack until it hits the guard page",
+        expected: Expected::Crashes(CLASS_DATA_ABORT_EL0),
+        code: user_overflow,
+    },
+    Program {
+        name: "writecode",
+        description: "overwrite its own code",
+        expected: Expected::Crashes(CLASS_DATA_ABORT_EL0),
+        code: user_write_code,
+    },
+    Program {
+        name: "runstack",
+        description: "jump to the stack",
+        expected: Expected::Crashes(CLASS_INSTRUCTION_ABORT_EL0),
+        code: user_run_stack,
     },
 ];
 

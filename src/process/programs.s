@@ -1,5 +1,6 @@
-// Built-in user programs. They run at EL0 from a copy at the start of the user window, so
-// they may only address memory PC-relatively, and reach the kernel only through svc.
+// Built-in user programs. Each runs at EL0 in its own address space, from a copy of this
+// section at the start of the user window, so they may only address memory PC-relatively,
+// and reach the kernel only through svc. Their stack is 64KB, with unmapped pages around it.
 // Names in braces are system call numbers and error codes from rustypi-abi.
 
 // Makes a system call: arguments in x0 to x5, result in x0.
@@ -75,10 +76,11 @@ user_abi:
     USER_SYSCALL {WRITE}
     cmn     x0, #{EFAULT}
     b.ne    .Labi_fail
-    // 2: so is a buffer running off the end of the user window (2MB from its start).
+    // 2: so is a buffer running off the end of the code into the unmapped page after it.
     mov     x19, #2
-    adr     x0, user_image_start
-    add     x0, x0, #0x200, lsl #12
+    adr     x0, user_image_end
+    add     x0, x0, #0xFFF
+    and     x0, x0, #0xFFFFFFFFFFFFF000
     sub     x0, x0, #2
     mov     x1, #4
     USER_SYSCALL {WRITE}
@@ -151,6 +153,47 @@ user_float:
     .inst   0x1e6e1000              // fmov d0, #1.0, which the softfloat assembler refuses
     mov     x0, #0
     USER_SYSCALL {EXIT}
+
+// Stores x0 (1 or 2 in `programs test`, which runs two of these at once) on the stack,
+// sleeps while the other one does the same at the same address, and checks it is still
+// there. Exits 0 if it is.
+.balign 4
+.global user_isolated
+user_isolated:
+    mov     x19, x0
+    str     x0, [sp, #-16]!
+    mov     x0, #50000              // 50ms
+    USER_SYSCALL {SLEEP}
+    ldr     x9, [sp], #16
+    cmp     x9, x19
+    cset    x0, ne
+    USER_SYSCALL {EXIT}
+
+// Pushes a page at a time until it runs off the bottom of its stack: killed by a data abort
+// in the guard page.
+.balign 4
+.global user_overflow
+user_overflow:
+    sub     sp, sp, #0x1000
+    str     xzr, [sp]
+    b       user_overflow
+
+// Writes to its own code, which is read-only: killed by a data abort.
+.balign 4
+.global user_write_code
+user_write_code:
+    adr     x0, user_write_code
+    str     xzr, [x0]
+    mov     x0, #0
+    USER_SYSCALL {EXIT}
+
+// Jumps to its stack, which isn't executable: killed by an instruction abort.
+.balign 4
+.global user_run_stack
+user_run_stack:
+    mov     x0, sp
+    sub     x0, x0, #16
+    br      x0
 
 .balign 4
 .global user_image_end

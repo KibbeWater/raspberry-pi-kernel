@@ -18,6 +18,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::time::Duration;
 use rustypi_core::sched::{Event, RunQueue, State, TaskId};
 use crate::arch::exception::ExceptionContext;
+use crate::arch::mmu;
 use crate::drivers::{interrupt, timer};
 use crate::synchronization::{interface::Mutex, IrqLock};
 use crate::arch;
@@ -45,6 +46,8 @@ struct Task {
     stack: Option<Box<[u8]>>,
     /// Where its registers are saved while it isn't running.
     context: *mut ExceptionContext,
+    /// Its address space, as a TTBR0 value: the kernel's, or its program's.
+    translation_base: u64,
 }
 
 struct Scheduler {
@@ -66,7 +69,11 @@ pub fn init(name: &'static str) {
     SCHEDULER.lock(|scheduler| {
         *scheduler = Some(Scheduler {
             queue: RunQueue::new(name),
-            tasks: vec![Some(Task { stack: None, context: core::ptr::null_mut() })],
+            tasks: vec![Some(Task {
+                stack: None,
+                context: core::ptr::null_mut(),
+                translation_base: mmu::kernel_translation_base(),
+            })],
         });
     });
     spawn_kernel("idle", Box::new(idle), true);
@@ -88,7 +95,7 @@ fn spawn_kernel(name: &'static str, entry: Box<dyn FnOnce()>, idle: bool) -> Tas
     let entry = Box::into_raw(Box::new(entry));
     let mut gpr = [0; 30];
     gpr[0] = entry as u64;
-    spawn_task(name, idle, ExceptionContext {
+    let start = ExceptionContext {
         gpr,
         lr: 0,
         elr: task_entry as usize as u64,
@@ -96,25 +103,39 @@ fn spawn_kernel(name: &'static str, entry: Box<dyn FnOnce()>, idle: bool) -> Tas
         esr: 0,
         sp_el0: 0,
         _reserved: 0,
-    })
+    };
+    spawn_task(name, idle, start, mmu::kernel_translation_base())
 }
 
-/// Starts a task that runs user code at `entry` on the user stack `stack_top`, both user
-/// addresses. It leaves only through `exit`, called on its behalf by `process`.
-pub fn spawn_user(name: &'static str, entry: usize, stack_top: usize) -> TaskId {
-    spawn_task(name, false, ExceptionContext {
-        gpr: [0; 30],
+/// What a user task starts with. Addresses are in its own address space.
+pub struct UserStart {
+    /// TTBR0 for its address space.
+    pub translation_base: u64,
+    pub entry: u64,
+    pub stack_top: u64,
+    /// Passed in x0.
+    pub arg: u64,
+}
+
+/// Starts a task that runs a program at EL0. It leaves only through `exit`, called on its
+/// behalf by `process` after `leave_user_space`.
+pub fn spawn_user(name: &'static str, start: UserStart) -> TaskId {
+    let mut gpr = [0; 30];
+    gpr[0] = start.arg;
+    let context = ExceptionContext {
+        gpr,
         lr: 0,
-        elr: entry as u64,
+        elr: start.entry,
         spsr: SPSR_EL0T,
         esr: 0,
-        sp_el0: stack_top as u64,
+        sp_el0: start.stack_top,
         _reserved: 0,
-    })
+    };
+    spawn_task(name, false, context, start.translation_base)
 }
 
 /// Adds a task whose first switch "returns" from an exception into `start`.
-fn spawn_task(name: &'static str, idle: bool, start: ExceptionContext) -> TaskId {
+fn spawn_task(name: &'static str, idle: bool, start: ExceptionContext, translation_base: u64) -> TaskId {
     let mut stack = vec![STACK_FILL; STACK_SIZE].into_boxed_slice();
     stack[..CANARY.len()].copy_from_slice(&CANARY);
 
@@ -128,7 +149,7 @@ fn spawn_task(name: &'static str, idle: bool, start: ExceptionContext) -> TaskId
         let scheduler = scheduler.as_mut().expect("sched::init first");
         let id = if idle { scheduler.queue.add_idle(name) } else { scheduler.queue.add(name) };
         scheduler.tasks.resize_with(id.0 + 1, || None);
-        scheduler.tasks[id.0] = Some(Task { stack: Some(stack), context });
+        scheduler.tasks[id.0] = Some(Task { stack: Some(stack), context, translation_base });
         id
     })
 }
@@ -137,6 +158,17 @@ extern "C" fn task_entry(entry: *mut Box<dyn FnOnce()>) -> ! {
     let entry = unsafe { Box::from_raw(entry) };
     entry();
     exit()
+}
+
+/// Moves the running task into the kernel's address space, so its program's can be freed.
+pub fn leave_user_space() {
+    SCHEDULER.lock(|scheduler| {
+        let scheduler = scheduler.as_mut().expect("sched::init first");
+        let current = scheduler.queue.current();
+        let task = scheduler.tasks[current.0].as_mut().expect("the running task exists");
+        task.translation_base = mmu::kernel_translation_base();
+        mmu::set_translation_base(task.translation_base);
+    });
 }
 
 /// Ends the running task. Its stack is freed on a later switch.
@@ -290,8 +322,10 @@ pub fn on_yield(ctx: *mut ExceptionContext) -> *mut ExceptionContext {
 impl Scheduler {
     fn switch(&mut self, ctx: *mut ExceptionContext, preempt: bool) -> *mut ExceptionContext {
         let current = self.queue.current();
+        let mut current_base = None;
         if let Some(task) = self.tasks[current.0].as_mut() {
             task.context = ctx;
+            current_base = Some(task.translation_base);
             if let Some(stack) = &task.stack {
                 if stack[..CANARY.len()] != CANARY {
                     panic!("task {} overflowed its stack", current.0);
@@ -309,6 +343,10 @@ impl Scheduler {
             self.queue.remove(id);
             self.tasks[id.0] = None;
         }
-        self.tasks[next.0].as_ref().expect("scheduled task exists").context
+        let next = self.tasks[next.0].as_ref().expect("scheduled task exists");
+        if current_base != Some(next.translation_base) {
+            mmu::set_translation_base(next.translation_base);
+        }
+        next.context
     }
 }
