@@ -148,6 +148,14 @@ pub struct InterruptIn {
     pub max_packet: u16,
 }
 
+/// A bulk endpoint of a device, one way.
+#[derive(Clone, Copy)]
+pub struct BulkEndpoint {
+    pub target: Target,
+    pub endpoint: u8,
+    pub max_packet: u16,
+}
+
 /// FIFO sizes, in 32-bit words. The controller has 4080 in all.
 const RX_FIFO_WORDS: u32 = 1024;
 const NP_TX_FIFO_WORDS: u32 = 1024;
@@ -229,9 +237,16 @@ fn wait_for(what: &'static str, timeout_us: u64, done: impl Fn() -> bool) -> Res
 /// controller reads them and dropped once it has written them, since the controller doesn't see
 /// the ARM caches. A whole number of lines, so nothing else shares them.
 #[repr(C, align(64))]
-struct DmaBuffer([u8; 512]);
+struct DmaBuffer<const N: usize>([u8; N]);
 
-impl DmaBuffer {
+impl<const N: usize> DmaBuffer<N> {
+    const WHOLE_LINES: () = assert!(N % CACHE_LINE == 0);
+
+    const fn new() -> Self {
+        let () = Self::WHOLE_LINES;
+        DmaBuffer([0; N])
+    }
+
     fn bus_address(&self) -> u32 {
         BusAddress::from_arm(self.0.as_ptr() as usize).0
     }
@@ -266,7 +281,12 @@ pub struct RootPort {
 pub struct Host {
     pub controller: Controller,
     pub port: RootPort,
-    buffer: DmaBuffer,
+    /// For control and interrupt transfers.
+    buffer: DmaBuffer<512>,
+    /// For bulk transfers: big enough for a burst of received Ethernet frames, and for one
+    /// frame to send.
+    bulk_in: DmaBuffer<4096>,
+    bulk_out: DmaBuffer<2048>,
 }
 
 impl Host {
@@ -289,7 +309,7 @@ impl Host {
         init_core(hw_cfg2)?;
         init_host(hw_cfg2)?;
         let port = enable_root_port()?;
-        Ok(Host { controller, port, buffer: DmaBuffer([0; 512]) })
+        Ok(Host { controller, port, buffer: DmaBuffer::new(), bulk_in: DmaBuffer::new(), bulk_out: DmaBuffer::new() })
     }
 
     /// Waits `ms` milliseconds, letting other tasks run.
@@ -485,6 +505,7 @@ impl Host {
             packets: 1,
             split: 0,
             odd_frame: false,
+            buffer: Buffer::Control,
         };
         let received = match endpoint.target.translator {
             None => self.direct_interrupt(base)?,
@@ -553,16 +574,81 @@ impl Host {
         Err(UsbError::Timeout("a periodic split transaction"))
     }
 
+    /// Sends `data` to a bulk OUT endpoint, in as many packets as it takes. `toggle` is the
+    /// endpoint's.
+    pub fn bulk_out(&mut self, endpoint: BulkEndpoint, toggle: &mut Toggle, data: &[u8]) -> Result<(), UsbError> {
+        if data.len() > self.bulk_out.0.len() {
+            return Err(UsbError::TooLong);
+        }
+        self.bulk_out.0[..data.len()].copy_from_slice(data);
+        self.bulk(endpoint, Direction::Out, toggle, data.len()).map(|_| ())
+    }
+
+    /// Takes what a bulk IN endpoint has, up to a burst of 4KB (fewer bytes, or none, if it
+    /// has less). `toggle` is the endpoint's.
+    pub fn bulk_in(&mut self, endpoint: BulkEndpoint, toggle: &mut Toggle) -> Result<&[u8], UsbError> {
+        let length = self.bulk_in.0.len();
+        let received = self.bulk(endpoint, Direction::In, toggle, length)?;
+        Ok(&self.bulk_in.0[..received])
+    }
+
+    /// A bulk transfer of up to `length` bytes, from or into the bulk buffer that way. The
+    /// controller keeps the data toggle across the packets and says where it ended up; a
+    /// transfer halted part way (NAKed) carries on from there. Returns the bytes moved.
+    fn bulk(&mut self, endpoint: BulkEndpoint, direction: Direction, toggle: &mut Toggle, length: usize) -> Result<usize, UsbError> {
+        let max_packet = endpoint.max_packet.max(1) as usize;
+        let mut done = 0;
+        let started = timer::now_us();
+        loop {
+            let left = length - done;
+            let packets = left.div_ceil(max_packet).max(1) as u32;
+            let t = Transaction {
+                target: endpoint.target,
+                endpoint: endpoint.endpoint,
+                kind: Kind::Bulk,
+                direction,
+                pid: toggle.0,
+                offset: done,
+                length: left,
+                packets,
+                split: 0,
+                odd_frame: false,
+                buffer: if direction == Direction::In { Buffer::BulkIn } else { Buffer::BulkOut },
+            };
+            let (interrupts, remaining) = self.run_channel(t)?;
+            done += left - remaining;
+            toggle.0 = channel_pid();
+            if interrupts & INT_STALL != 0 {
+                return Err(UsbError::Stalled("bulk"));
+            }
+            if interrupts & INT_XFER_COMPLETE != 0 {
+                return Ok(done);
+            }
+            if interrupts & INT_NAK == 0 || interrupts & INT_ERRORS != 0 {
+                return Err(UsbError::Transfer { stage: "bulk", interrupts });
+            }
+            if timer::now_us() - started > TRANSFER_TIMEOUT_US {
+                return Err(UsbError::Timeout("a bulk transfer"));
+            }
+            sched::sleep(Duration::from_millis(1));
+        }
+    }
+
     /// Runs one transaction (or, direct, a whole control stage) on the channel and waits for
     /// it to halt. Returns the channel's interrupt bits and how many of its bytes weren't moved.
     fn run_channel(&mut self, t: Transaction) -> Result<(u32, usize), UsbError> {
         let n = CONTROL_CHANNEL;
-        self.buffer.clean_and_invalidate();
+        let (bus_address, clean): (u32, &dyn Fn()) = match t.buffer {
+            Buffer::Control => (self.buffer.bus_address(), &|| self.buffer.clean_and_invalidate()),
+            Buffer::BulkIn => (self.bulk_in.bus_address(), &|| self.bulk_in.clean_and_invalidate()),
+            Buffer::BulkOut => (self.bulk_out.bus_address(), &|| self.bulk_out.clean_and_invalidate()),
+        };
+        clean();
         write(channel(n, CHAN_INT), u32::MAX);
         write(channel(n, CHAN_INT_MASK), 0);
         write(channel(n, CHAN_SPLIT), t.split);
         write(channel(n, CHAN_XFER_SIZE), t.length as u32 | t.packets << 19 | (t.pid as u32) << 29);
-        write(channel(n, CHAN_DMA), self.buffer.bus_address() + t.offset as u32);
+        write(channel(n, CHAN_DMA), bus_address + t.offset as u32);
         let mut character = t.target.max_packet as u32 & 0x7FF
             | (t.endpoint as u32 & 0xF) << 11
             | (t.kind as u32) << 18
@@ -582,7 +668,7 @@ impl Host {
         wait_for("a transfer", TRANSFER_TIMEOUT_US, || read(channel(n, CHAN_INT)) & INT_HALTED != 0)?;
         let interrupts = read(channel(n, CHAN_INT));
         // DMA may have written the buffer: drop anything the CPU cached of it meanwhile.
-        self.buffer.clean_and_invalidate();
+        clean();
         let remaining = (read(channel(n, CHAN_XFER_SIZE)) & 0x7FFFF) as usize;
         Ok((interrupts, remaining.min(t.length)))
     }
@@ -592,7 +678,16 @@ impl Host {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Control = 0,
+    Bulk = 2,
     Interrupt = 3,
+}
+
+/// Which DMA buffer a transaction's data is in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Buffer {
+    Control,
+    BulkIn,
+    BulkOut,
 }
 
 /// One transaction for the channel to run.
@@ -611,6 +706,7 @@ struct Transaction {
     split: u32,
     /// For periodic transactions: run in an odd (micro)frame, rather than an even one.
     odd_frame: bool,
+    buffer: Buffer,
 }
 
 impl Transaction {
@@ -627,6 +723,7 @@ impl Transaction {
             packets,
             split: 0,
             odd_frame: false,
+            buffer: Buffer::Control,
         }
     }
 }
@@ -639,6 +736,15 @@ fn interrupt_outcome(interrupts: u32) -> Result<Option<usize>, UsbError> {
         Ok(None)
     } else {
         Err(UsbError::Transfer { stage: "interrupt", interrupts })
+    }
+}
+
+/// The data PID the channel's next packet would carry, after a transfer: where the endpoint's
+/// data toggle is now.
+fn channel_pid() -> Pid {
+    match read(channel(CONTROL_CHANNEL, CHAN_XFER_SIZE)) >> 29 & 3 {
+        2 => Pid::Data1,
+        _ => Pid::Data0,
     }
 }
 
