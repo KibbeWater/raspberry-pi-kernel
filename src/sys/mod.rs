@@ -1,5 +1,5 @@
 // sys/mod.rs
-//! Kernel-wide system API: time, power and board information.
+//! Kernel-wide system API: startup, time, power, interrupts and board information.
 //!
 //! Code outside `drivers` should go through here rather than poking hardware.
 
@@ -7,11 +7,50 @@ pub mod print;
 mod panic;
 
 use core::time::Duration;
+use crate::arch;
+use crate::drivers::interrupt::{self, Irq};
 use crate::drivers::{mailbox, power, timer};
 use crate::drivers::uart::Uart;
 
+/// Git commit the kernel was built from, with `-dirty` for uncommitted changes.
+pub const VERSION: &str = env!("GIT_VERSION");
+
+/// Period of the timer tick. It wakes `idle` so the main loop runs at least this often.
+const TICK: Duration = Duration::from_millis(100);
+
 const TAG_BOARD_REVISION: u32 = 0x0001_0002;
 const TAG_TEMPERATURE: u32 = 0x0003_0006;
+
+/// Turns on the MMU and caches. Must be the first thing `kernel_main` does.
+pub fn init() {
+    arch::mmu::enable();
+}
+
+/// Starts interrupt-driven UART receive and the timer tick, then unmasks IRQs.
+/// Call once the UART is initialized.
+pub fn enable_interrupts() {
+    Uart::enable_rx_interrupt();
+    interrupt::enable(Irq::Uart0);
+    timer::start_tick(TICK.as_micros() as u32);
+    interrupt::enable(Irq::SystemTimer1);
+    arch::irq_enable();
+}
+
+/// Sleeps until an interrupt, unless UART input is already waiting. Wakes at least
+/// every `TICK`.
+pub fn idle() {
+    arch::wait_for_interrupt_unless(Uart::has_input);
+}
+
+/// Current exception level; 1 in normal operation.
+pub fn exception_level() -> u8 {
+    arch::exception_level()
+}
+
+/// Whether the MMU and caches are on.
+pub fn mmu_enabled() -> bool {
+    arch::mmu::is_enabled()
+}
 
 /// Time since the board was reset.
 pub fn uptime() -> Duration {

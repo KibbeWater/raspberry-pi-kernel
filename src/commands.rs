@@ -13,10 +13,12 @@ const COMMANDS: &[(&str, &str)] = &[
     ("help", "list commands"),
     ("led on|off|toggle", "switch the status LED"),
     ("uptime", "time since reset"),
-    ("info", "board revision and SoC temperature"),
+    ("version", "git commit the kernel was built from"),
+    ("info", "board revision, SoC temperature, EL and MMU"),
     ("reboot", "reset the board"),
     ("shutdown", "halt; pull GPIO3 low to boot again"),
     ("panic [msg]", "panic, blink the LED and reboot"),
+    ("fault", "read unmapped memory to test the exception handler"),
 ];
 
 pub struct Shell {
@@ -46,6 +48,7 @@ impl Shell {
             "uptime" => {
                 link::send_fmt("RSP", format_args!("uptime {}s", sys::uptime().as_secs()))
             }
+            "version" => link::send_fmt("RSP", format_args!("RustyPI {}", sys::VERSION)),
             "info" => info(),
             "reboot" => {
                 link::send("RSP", "rebooting");
@@ -57,6 +60,11 @@ impl Shell {
             }
             "panic" => panic!("panic requested over link"),
             _ if text.starts_with("panic ") => panic!("{}", text["panic ".len()..].trim()),
+            "fault" => {
+                // Nothing is mapped above 2GB, so this raises a data abort.
+                let value = unsafe { core::ptr::read_volatile(0xDEAD_0000 as *const u32) };
+                link::send_fmt("RSP", format_args!("read {:#x}, expected a fault", value));
+            }
             _ => link::send_fmt("RSP", format_args!("echo: {}", text)),
         }
     }
@@ -69,13 +77,17 @@ impl Shell {
 }
 
 fn info() {
+    let el = sys::exception_level();
+    let mmu = if sys::mmu_enabled() { "on" } else { "off" };
     match (sys::board_revision(), sys::temperature()) {
         (Some(revision), Some(millidegrees)) => link::send_fmt("RSP", format_args!(
-            "board rev {:#x}, soc {}.{} C",
+            "board rev {:#x}, soc {}.{} C, EL{}, mmu {}",
             revision,
             millidegrees / 1000,
             millidegrees % 1000 / 100,
+            el,
+            mmu,
         )),
-        _ => link::send("RSP", "firmware did not answer"),
+        _ => link::send_fmt("RSP", format_args!("firmware did not answer, EL{}, mmu {}", el, mmu)),
     }
 }

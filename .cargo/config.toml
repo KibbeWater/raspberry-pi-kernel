@@ -2,6 +2,4 @@
 target = "aarch64-unknown-none-softfloat"  # 64-bit bare metal, no FP/SIMD (not enabled at boot)
 
 [target.aarch64-unknown-none-softfloat]
-# strict-align: the MMU is off, so all memory is Device memory and unaligned accesses fault.
-# rustc warns that it does not know the feature, but still passes it to LLVM.
-rustflags = ["-C", "target-cpu=cortex-a53", "-C", "target-feature=+strict-align", "-C", "link-arg=--script=./linker.ld"]
+rustflags = ["-C", "target-cpu=cortex-a53", "-C", "link-arg=--script=./linker.ld"]

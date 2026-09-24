@@ -39,9 +39,18 @@ fn write(addr: usize, value: u32) {
     unsafe { write_volatile(addr as *mut u32, value) }
 }
 
-/// Barrier that also tells the compiler the firmware may read or write `ptr`.
+const CACHE_LINE: usize = 64;
+
+/// Cleans and invalidates the buffer's cache lines so the firmware, which doesn't see
+/// the ARM caches, reads what we wrote and we read what it wrote. Also tells the
+/// compiler the firmware may have changed the buffer.
 #[inline(always)]
-fn sync_buffer(ptr: *mut u32) {
+fn sync_buffer(ptr: *mut u32, len: usize) {
+    let start = ptr as usize & !(CACHE_LINE - 1);
+    let end = ptr as usize + len;
+    for line in (start..end).step_by(CACHE_LINE) {
+        unsafe { asm!("dc civac, {}", in(reg) line, options(nostack, preserves_flags)) };
+    }
     unsafe { asm!("dsb sy", in("x0") ptr, options(nostack, preserves_flags)) };
 }
 
@@ -50,10 +59,11 @@ fn sync_buffer(ptr: *mut u32) {
 /// Returns `false` if the firmware reported an error.
 pub fn call<const N: usize>(channel: u8, msg: &mut Message<N>) -> bool {
     let ptr = msg.0.as_mut_ptr();
+    let len = N * 4;
     // Kernel memory lives in the low 4GB, so the address fits in 32 bits.
     let value = (ptr as usize as u32 & !0xF) | (channel as u32 & 0xF);
 
-    sync_buffer(ptr);
+    sync_buffer(ptr, len);
     while read(MBOX1_STATUS) & STATUS_FULL != 0 {}
     write(MBOX1_WRITE, value);
 
@@ -63,7 +73,7 @@ pub fn call<const N: usize>(channel: u8, msg: &mut Message<N>) -> bool {
             break;
         }
     }
-    sync_buffer(ptr);
+    sync_buffer(ptr, len);
 
     msg.0[1] == RESPONSE_OK
 }

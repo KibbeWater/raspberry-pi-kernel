@@ -1,21 +1,19 @@
 #![no_std]
 #![no_main]
 
+mod arch;
 mod board;
 mod commands;
 mod drivers;
 mod link;
-#[allow(dead_code)] // Not used yet; kept for when interrupts or cores come in.
+#[allow(dead_code)] // Not used yet; kept for when shared state needs locking.
 mod synchronization;
 mod sys;
 
-use core::arch::global_asm;
 use core::time::Duration;
 use commands::Shell;
 use drivers::uart::Uart;
 use link::{Link, Stats};
-
-global_asm!(include_str!("boot.s"));
 
 /// Name announced in `HELLO` frames.
 const NAME: &str = "RustyPI";
@@ -23,19 +21,21 @@ const NAME: &str = "RustyPI";
 /// How often the Pi reports its receive counters, even when nothing talks to it.
 const STAT_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Called by `boot.s` on core 0 once the stack and `.bss` are set up.
+/// Called by `arch/boot.s` on core 0 at EL1, once the stack and `.bss` are set up.
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
+    sys::init();
     sys::sleep(Duration::from_secs(1));
     Uart::init(link::BAUD);
-    println!("Hello from RPi!");
+    println!("Hello from RPi! {} {} at EL{}", NAME, sys::VERSION, sys::exception_level());
     link::send("HELLO", NAME);
 
     let mut shell = Shell::new();
 
-    // Poll continuously: the PL011 RX FIFO only holds 16 bytes (~4ms at 38400 baud),
-    // so nothing in this loop may block.
+    // Received bytes are queued by the UART interrupt, so the loop can sleep between
+    // wake-ups (UART input or the timer tick) without losing any.
     let mut link = Link::new();
+    sys::enable_interrupts();
     let mut last_stat = sys::uptime();
     loop {
         link.poll(|kind, payload| match kind {
@@ -49,6 +49,8 @@ pub extern "C" fn kernel_main() -> ! {
             last_stat = sys::uptime();
             send_stat(&link.stats);
         }
+
+        sys::idle();
     }
 }
 

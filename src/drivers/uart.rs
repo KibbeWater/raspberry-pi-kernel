@@ -1,5 +1,7 @@
 // UART.rs
+use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_volatile};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::board::PERIPHERAL_BASE;
 use crate::drivers::gpio::{Pin, PinMode, PullMode, set_pin_mode, set_pin_pull};
 
@@ -18,6 +20,11 @@ const UART_DR_ERRORS: u32 = 0xF << 8;
 const UART_CR_UARTEN: u32 = 1 << 0; // UART enable
 const UART_CR_TXE: u32 = 1 << 8;    // Transmit enable
 const UART_CR_RXE: u32 = 1 << 9;    // Receive enable
+
+/// Receive and receive-timeout bits, shared by the interrupt mask and clear registers.
+/// The timeout fires when bytes sit below the FIFO trigger level for 32 bit periods.
+const UART_INT_RX: u32 = 1 << 4;
+const UART_INT_RT: u32 = 1 << 6;
 
 /// Bit flags for the UART Line Control Register.
 const UART_LCRH_FEN: u32 = 1 << 4;          // FIFO enable
@@ -134,18 +141,36 @@ impl Uart {
         while (read_reg(&uart.fr) & UART_FR_BUSY) != 0 {}
     }
 
-    /// Tries to receive one byte from UART.
-    ///
-    /// Returns `None` if the receive FIFO is empty, or `Some(Err(byte))` when the UART
-    /// flagged the byte as damaged (framing, parity, break or overrun error).
-    pub fn receive_checked() -> Option<Result<u8, u8>> {
+    /// Starts filling the receive queue from the UART interrupt. `Irq::Uart0` must be
+    /// enabled too.
+    pub fn enable_rx_interrupt() {
         let uart = uart_regs();
-        if (read_reg(&uart.fr) & UART_FR_RXFE) != 0 {
-            return None;
+        write_reg(&mut uart.imsc, UART_INT_RX | UART_INT_RT);
+    }
+
+    /// Moves everything in the receive FIFO into the receive queue.
+    pub fn handle_interrupt() {
+        let uart = uart_regs();
+        while (read_reg(&uart.fr) & UART_FR_RXFE) == 0 {
+            RX_QUEUE.push((read_reg(&uart.dr) & 0xFFF) as u16);
         }
-        let dr = read_reg(&uart.dr);
-        let byte = (dr & 0xFF) as u8;
-        Some(if dr & UART_DR_ERRORS != 0 { Err(byte) } else { Ok(byte) })
+        write_reg(&mut uart.icr, UART_INT_RX | UART_INT_RT);
+    }
+
+    /// Whether `receive_checked` has something to return.
+    pub fn has_input() -> bool {
+        RX_QUEUE.has_input()
+    }
+
+    /// Takes one received byte from the receive queue.
+    ///
+    /// Returns `None` if nothing is queued, or `Some(Err(byte))` when the byte is
+    /// damaged: the UART flagged it (framing, parity, break or overrun error), or the
+    /// queue overflowed and bytes were lost before it.
+    pub fn receive_checked() -> Option<Result<u8, u8>> {
+        let entry = RX_QUEUE.pop()?;
+        let byte = entry as u8;
+        Some(if entry as u32 & UART_DR_ERRORS != 0 { Err(byte) } else { Ok(byte) })
     }
 
     /// Sends a string over UART.
@@ -153,5 +178,62 @@ impl Uart {
         for byte in s.bytes() {
             Self::send(byte);
         }
+    }
+}
+
+const RX_QUEUE_LEN: usize = 1024;
+
+/// Single-producer (IRQ handler), single-consumer (main loop) ring buffer of data
+/// register values: the byte plus its error bits. Uses only atomic loads and stores.
+struct RxQueue {
+    entries: UnsafeCell<[u16; RX_QUEUE_LEN]>,
+    /// Next slot to write; only the producer stores it.
+    head: AtomicUsize,
+    /// Next slot to read; only the consumer stores it.
+    tail: AtomicUsize,
+    /// Set by the producer when the queue was full; the consumer reports it once.
+    overflowed: AtomicBool,
+}
+
+// Safe because each slot is only written by the producer before it publishes `head`,
+// and only read by the consumer before it releases the slot through `tail`.
+unsafe impl Sync for RxQueue {}
+
+static RX_QUEUE: RxQueue = RxQueue {
+    entries: UnsafeCell::new([0; RX_QUEUE_LEN]),
+    head: AtomicUsize::new(0),
+    tail: AtomicUsize::new(0),
+    overflowed: AtomicBool::new(false),
+};
+
+impl RxQueue {
+    fn push(&self, entry: u16) {
+        let head = self.head.load(Ordering::Relaxed);
+        let next = (head + 1) % RX_QUEUE_LEN;
+        if next == self.tail.load(Ordering::Acquire) {
+            self.overflowed.store(true, Ordering::Relaxed);
+            return;
+        }
+        unsafe { (*self.entries.get())[head] = entry };
+        self.head.store(next, Ordering::Release);
+    }
+
+    fn pop(&self) -> Option<u16> {
+        if self.overflowed.load(Ordering::Relaxed) {
+            self.overflowed.store(false, Ordering::Relaxed);
+            return Some(UART_DR_ERRORS as u16);
+        }
+        let tail = self.tail.load(Ordering::Relaxed);
+        if tail == self.head.load(Ordering::Acquire) {
+            return None;
+        }
+        let entry = unsafe { (*self.entries.get())[tail] };
+        self.tail.store((tail + 1) % RX_QUEUE_LEN, Ordering::Release);
+        Some(entry)
+    }
+
+    fn has_input(&self) -> bool {
+        self.overflowed.load(Ordering::Relaxed)
+            || self.tail.load(Ordering::Relaxed) != self.head.load(Ordering::Acquire)
     }
 }

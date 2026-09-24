@@ -6,3 +6,6 @@ pub const PERIPHERAL_BASE: usize = 0x3F00_0000;
 
 /// GPIO pin of the external status LED, blinked on panic.
 pub const STATUS_LED: u8 = 21;
+
+/// ARM local peripherals: core timers, core mailboxes and interrupt routing.
+pub const LOCAL_PERIPHERAL_BASE: usize = 0x4000_0000;
