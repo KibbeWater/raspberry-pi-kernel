@@ -67,6 +67,27 @@ impl Class {
     pub const HID: Class = Class(3);
     pub const HUB: Class = Class(9);
     pub const VENDOR: Class = Class(0xFF);
+
+    /// What the class is, for people.
+    pub fn name(self) -> &'static str {
+        match self.0 {
+            0x00 => "per interface",
+            0x01 => "audio",
+            0x02 => "communications",
+            0x03 => "HID",
+            0x06 => "imaging",
+            0x07 => "printer",
+            0x08 => "mass storage",
+            0x09 => "hub",
+            0x0A => "CDC data",
+            0x0B => "smart card",
+            0x0E => "video",
+            0xE0 => "wireless",
+            0xEF => "miscellaneous",
+            0xFF => "vendor specific",
+            _ => "other",
+        }
+    }
 }
 
 /// HID interface subclass and protocol of a keyboard that speaks the boot protocol.

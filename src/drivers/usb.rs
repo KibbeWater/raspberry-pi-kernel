@@ -1,7 +1,8 @@
 // usb.rs
 //! The Synopsys DesignWare USB 2.0 OTG controller (DWC2) of the BCM2835 family, as a USB host:
 //! powering it on, resetting it into host mode, bringing up its one root port, and control
-//! transfers on endpoint 0, polled, through DMA on one of its host channels.
+//! transfers on endpoint 0, polled, through DMA on one of its host channels: the `Bus` that
+//! enumeration (`rustypi_core::usb::tree`) runs on.
 //!
 //! On the Pi 3 B+ the root port leads to the LAN7515: a hub, a second hub behind it, and the
 //! LAN7800 Ethernet controller. Register names follow Circle's `dwhci.h`
@@ -11,6 +12,7 @@ use core::arch::asm;
 use core::fmt;
 use core::time::Duration;
 use rustypi_core::mailbox::BusAddress;
+use rustypi_core::usb::tree::{Bus, Target};
 use rustypi_core::usb::{Direction, SetupPacket, Speed};
 use crate::board::PERIPHERAL_BASE;
 use crate::drivers::mailbox::tags::{DeviceId, PowerState, SetPowerState};
@@ -236,16 +238,22 @@ impl Host {
         Ok(Host { controller, port, buffer: DmaBuffer([0; 512]) })
     }
 
-    /// A control transfer to endpoint 0 of the device at `address`: the setup stage, a data
-    /// stage in `setup`'s direction if it has a length, and the status stage. Returns the
-    /// bytes received, for an IN transfer.
-    pub fn control(&mut self, address: u8, max_packet: u16, setup: SetupPacket) -> Result<&[u8], UsbError> {
+    /// Waits `ms` milliseconds, letting other tasks run.
+    fn sleep_ms(ms: u32) {
+        sched::sleep(Duration::from_millis(ms as u64));
+    }
+}
+
+impl Bus for Host {
+    type Error = UsbError;
+
+    /// The setup stage, a data stage in `setup`'s direction if it has a length, and the status
+    /// stage, through the DMA buffer.
+    fn control(&mut self, target: Target, setup: SetupPacket, data: &mut [u8]) -> Result<usize, UsbError> {
         let length = setup.length as usize;
-        if length > self.buffer.0.len() {
+        if length > self.buffer.0.len() || length > data.len() {
             return Err(UsbError::TooLong);
         }
-        let low_speed = self.port.speed == Speed::Low;
-        let target = Target { address, max_packet, low_speed };
 
         self.buffer.0[..8].copy_from_slice(&setup.to_bytes());
         self.transfer(target, Direction::Out, Pid::Setup, 8, "setup")?;
@@ -253,13 +261,26 @@ impl Host {
         let direction = setup.direction();
         let mut received = 0;
         if length > 0 {
+            if direction == Direction::Out {
+                self.buffer.0[..length].copy_from_slice(&data[..length]);
+            }
             received = self.transfer(target, direction, Pid::Data1, length, "data")?;
+            if direction == Direction::In {
+                data[..received].copy_from_slice(&self.buffer.0[..received]);
+            }
         }
         // The status stage goes the other way, and is always DATA1.
         let status_direction = if length > 0 && direction == Direction::In { Direction::Out } else { Direction::In };
         self.transfer(target, status_direction, Pid::Data1, 0, "status")?;
-        Ok(&self.buffer.0[..if direction == Direction::In { received } else { 0 }])
+        Ok(if direction == Direction::In { received } else { 0 })
     }
+
+    fn delay_ms(&mut self, ms: u32) {
+        Host::sleep_ms(ms);
+    }
+}
+
+impl Host {
 
     /// One stage: `length` bytes from (OUT) or into (IN) the buffer. Returns how many moved.
     fn transfer(&mut self, target: Target, direction: Direction, pid: Pid, length: usize, stage: &'static str) -> Result<usize, UsbError> {
@@ -285,7 +306,7 @@ impl Host {
             if direction == Direction::In {
                 character |= CHAR_EP_IN;
             }
-            if target.low_speed {
+            if target.speed == Speed::Low {
                 character |= CHAR_LOW_SPEED;
             }
             write(channel(n, CHAN_CHARACTER), character | CHAR_ENABLE);
@@ -309,14 +330,6 @@ impl Host {
             return Ok(length - remaining.min(length));
         }
     }
-}
-
-/// Endpoint 0 of a device.
-#[derive(Clone, Copy)]
-struct Target {
-    address: u8,
-    max_packet: u16,
-    low_speed: bool,
 }
 
 /// Resets the core and sets up its PHY and DMA, like Circle's `InitCore`.
