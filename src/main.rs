@@ -22,7 +22,7 @@ use core::time::Duration;
 use commands::Shell;
 use drivers::uart::Uart;
 use link::{Link, Stats};
-use rustypi_core::session::{self, Session};
+use rustypi_core::session::{self, Reply, Session};
 use synchronization::{interface::Mutex, IrqLock};
 
 /// Name announced in `HELLO` frames.
@@ -46,6 +46,8 @@ enum Inbound {
     Hello,
     /// A `MSG` frame's payload.
     Msg(String),
+    /// A line typed on the Pi's own keyboard. Its reply is printed, not framed.
+    Local(String),
 }
 
 /// Frames waiting for the shell task, oldest first.
@@ -82,6 +84,9 @@ pub extern "C" fn kernel_main() -> ! {
     sched::spawn("stat", stat_task);
     sys::enable_interrupts();
     println!("cores: {} of {} running", sys::cores::start(), board::CORES);
+    sys::usb::start(|line| {
+        deliver(Inbound::Local(line));
+    });
     shell_task()
 }
 
@@ -153,6 +158,16 @@ fn shell_task() -> ! {
                 // Uno already sent its next request, which is pending now instead.
                 if let Some(seq) = session::request_seq(&payload) {
                     let _ = PENDING.compare_exchange(seq as u32 + 1, 0, Ordering::Relaxed, Ordering::Relaxed);
+                }
+                if let Some(action) = action {
+                    action.perform();
+                }
+            }
+            Inbound::Local(line) => {
+                let mut reply = Reply::new();
+                let action = shell.handle(&line, &mut reply);
+                for line in reply.lines() {
+                    println!("{line}");
                 }
                 if let Some(action) = action {
                     action.perform();

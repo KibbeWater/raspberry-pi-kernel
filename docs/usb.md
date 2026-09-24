@@ -31,8 +31,10 @@ Ethernet.
 | Enumeration and hubs: addresses, configurations, port power and reset, walking the tree; generic over a `Bus`, tested against a pretend 3B+ bus | `rustypi-core/src/usb/tree.rs` |
 | `usb` command: starts the controller, enumerates the bus, prints it as a tree | `src/sys/usb.rs`, `src/commands/usb.rs` |
 
-Steps 1 to 3 below are done: low and full speed devices behind the hubs (keyboards) are
-enumerated through their hub's transaction translator.
+Steps 1 to 4 below are done. USB starts at boot in the background (`sys::usb`); `usb` shows
+the bus as found then. A boot protocol keyboard is polled every 10ms (interrupt transfers,
+split through its hub's translator on the microframe schedule), and what is typed is echoed on
+the screen and handed to the shell a line at a time. No key repeat or hot plugging yet.
 
 ## The plan
 

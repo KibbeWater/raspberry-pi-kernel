@@ -7,32 +7,31 @@ use rustypi_core::usb::{Class, Speed};
 use super::{Command, Outcome, Shell};
 use crate::drivers::usb::UsbError;
 use crate::sys;
-use crate::sys::usb::Port;
+use crate::sys::usb::{Port, Status};
 
 pub const COMMANDS: &[Command] = &[
-    Command { name: "usb", args: "", description: "start the USB controller and list the devices on the bus", run: usb },
+    Command { name: "usb", args: "", description: "list the devices on the USB bus, as found at boot", run: usb },
 ];
 
 fn usb<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     if !args.is_empty() {
         return Outcome::Usage;
     }
-    let scan = match sys::usb::scan() {
-        Ok(scan) => scan,
-        Err(error) => {
-            reply.line(LineKind::Rsp, format_args!("usb: {error}"));
-            return Outcome::Done;
+    sys::usb::inspect(|status| match status {
+        Status::Starting => reply.rsp("usb: still starting"),
+        Status::Failed(error) => reply.line(LineKind::Rsp, format_args!("usb: {error}")),
+        Status::Running { controller, root } => {
+            let version = controller.version;
+            reply.line(LineKind::Rsp, format_args!(
+                "controller: DWC2 {:x}.{:02x}{}, {} host channels",
+                version >> 12,
+                version >> 4 & 0xFF,
+                char::from_digit((version & 0xF) as u32, 16).unwrap_or('?'),
+                controller.channels,
+            ));
+            list(root, "", reply);
         }
-    };
-    let version = scan.controller.version;
-    reply.line(LineKind::Rsp, format_args!(
-        "controller: DWC2 {:x}.{:02x}{}, {} host channels",
-        version >> 12,
-        version >> 4 & 0xFF,
-        char::from_digit((version & 0xF) as u32, 16).unwrap_or('?'),
-        scan.controller.channels,
-    ));
-    list(&scan.root, "", reply);
+    });
     Outcome::Done
 }
 
