@@ -7,11 +7,28 @@ use rustypi_core::usb::{Class, Speed};
 use super::{Command, Outcome, Shell};
 use crate::drivers::usb::UsbError;
 use crate::sys;
-use crate::sys::usb::{Port, Status};
+use crate::sys::usb::{Layout, Port, Status};
 
 pub const COMMANDS: &[Command] = &[
     Command { name: "usb", args: "", description: "list the devices on the USB bus, as found at boot", run: usb },
+    Command { name: "keyboard", args: "[us|sv]", description: "show or change (and save) the USB keyboard layout", run: keyboard },
 ];
+
+fn keyboard<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
+    if args.is_empty() {
+        let names: alloc::vec::Vec<_> = Layout::ALL.iter().map(|layout| layout.name()).collect();
+        reply.line(LineKind::Rsp, format_args!("keyboard layout: {} (of {})", sys::usb::layout().name(), names.join(", ")));
+        return Outcome::Done;
+    }
+    let Some(layout) = Layout::from_name(&args.to_ascii_lowercase()) else {
+        return Outcome::Usage;
+    };
+    match sys::usb::set_layout(layout) {
+        Ok(()) => reply.line(LineKind::Rsp, format_args!("keyboard layout: {}, saved", layout.name())),
+        Err(error) => reply.line(LineKind::Rsp, format_args!("keyboard layout: {}, but not saved: {}", layout.name(), error)),
+    }
+    Outcome::Done
+}
 
 fn usb<'a>(_: &mut Shell, args: &'a str, reply: &mut Reply) -> Outcome<'a> {
     if !args.is_empty() {

@@ -2,20 +2,25 @@
 //! USB: a task started at boot brings up the host controller and enumerates the bus, through
 //! the hubs (on the Pi 3 B+, the LAN7515's two hubs, its LAN7800 Ethernet controller, and
 //! whatever is plugged in). If there is a boot protocol keyboard, the task then polls it and
-//! turns what is typed into lines for the shell, echoed on the screen.
+//! turns what is typed into lines for the shell, echoed on the screen, in the layout chosen
+//! with `set_layout` (saved in `/keyboard.txt`).
 
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::String;
 use core::fmt;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use rustypi_core::line::LineEditor;
 use rustypi_core::usb::tree::{self, Bus, Device, Target};
-use rustypi_core::usb::{key_to_char, Direction, EndpointType, KeyboardReport, SetupPacket};
+use rustypi_core::usb::{Direction, EndpointType, KeyboardReport, SetupPacket};
 use crate::drivers::usb::{Controller, Host, InterruptIn, Toggle, UsbError};
 use crate::synchronization::{interface::Mutex as _, Mutex};
+use crate::sys::fs::{self, FsError};
 use crate::{println, sched};
 
 pub use rustypi_core::usb::tree::Port;
+pub use rustypi_core::usb::Layout;
 
 /// The longest line the keyboard types, like the link's.
 const MAX_LINE: usize = rustypi_core::link::MAX_LINE;
@@ -24,6 +29,39 @@ const MAX_LINE: usize = rustypi_core::link::MAX_LINE;
 const MIN_POLL: Duration = Duration::from_millis(10);
 /// How long to back off after the keyboard fails to answer (unplugged, say).
 const ERROR_BACKOFF: Duration = Duration::from_secs(1);
+
+/// Where the keyboard layout is kept between boots: its name, like `sv`.
+const LAYOUT_FILE: &str = "/keyboard.txt";
+
+/// The keyboard layout, as an index into `Layout::ALL`.
+static LAYOUT: AtomicUsize = AtomicUsize::new(0);
+
+/// The keyboard layout in use.
+pub fn layout() -> Layout {
+    Layout::ALL[LAYOUT.load(Ordering::Relaxed)]
+}
+
+/// Switches the keyboard layout, now and (saved in `LAYOUT_FILE`) from the next boot on.
+pub fn set_layout(layout: Layout) -> Result<(), FsError> {
+    use_layout(layout);
+    fs::write_file(LAYOUT_FILE, format!("{}\n", layout.name()).as_bytes())
+}
+
+fn use_layout(layout: Layout) {
+    let index = Layout::ALL.iter().position(|&l| l == layout).expect("every layout is in ALL");
+    LAYOUT.store(index, Ordering::Relaxed);
+}
+
+/// Picks up the layout saved by `set_layout`, if there is one.
+fn load_layout() {
+    let saved = fs::read_file(LAYOUT_FILE).ok().and_then(|bytes| {
+        let name = core::str::from_utf8(&bytes).ok()?.trim().to_ascii_lowercase();
+        Layout::from_name(&name)
+    });
+    if let Some(layout) = saved {
+        use_layout(layout);
+    }
+}
 
 #[derive(Debug)]
 pub enum ScanError {
@@ -77,6 +115,7 @@ pub fn start(on_line: fn(String)) {
 }
 
 fn run(on_line: fn(String)) {
+    load_layout();
     // Enumerated before taking the lock, which would otherwise be held for seconds.
     let scanned = Host::start().map_err(ScanError::Start).and_then(|mut host| {
         let speed = host.port.speed;
@@ -173,7 +212,7 @@ fn serve_keyboard(keyboard: Keyboard, on_line: fn(String)) {
         failing = false;
         let Some(report) = report else { continue };
         for key in report.pressed_since(&previous) {
-            let Some(c) = key_to_char(key, report.shift()) else { continue };
+            let Some(c) = layout().char(key, report.held()) else { continue };
             if let Some(line) = editor.feed(c, |shown| super::console::write_fmt(format_args!("{shown}"))) {
                 on_line(line);
             }
